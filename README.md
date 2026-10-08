@@ -1,4 +1,4 @@
-# AirType ✋✍️  
+# AirDoodle ✋✍️  
 **Air Writing, Gesture Control & Vision-Based Interaction System**
 
 AirType is a **computer vision–based input system** that enables **air writing**, **hand gesture recognition**, and **gesture-driven interaction** using a standard webcam — no physical input devices required.
