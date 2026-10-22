@@ -1,8 +1,8 @@
 # phase4_device_control.py
 
 import cv2
-from utils.hand_tracker import HandTracker
-from utils.gesture_recognizer import GestureRecognizer
+from vision.tracking.hand_tracker import HandTracker
+from vision.gestures.gesture_recognizer import GestureRecognizer
 from utils.system_control import (
     set_system_volume,
     set_screen_brightness,

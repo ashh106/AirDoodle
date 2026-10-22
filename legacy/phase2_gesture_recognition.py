@@ -1,8 +1,8 @@
 # phase2_gesture_recognition.py
 
 import cv2
-from utils.hand_tracker import HandTracker
-from utils.gesture_recognizer import GestureRecognizer
+from vision.tracking.hand_tracker import HandTracker
+from vision.gestures.gesture_recognizer import GestureRecognizer
 
 def main():
     cap = cv2.VideoCapture(0)

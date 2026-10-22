@@ -2,8 +2,8 @@
 
 import cv2
 import numpy as np
-from utils.hand_tracker import HandTracker
-from utils.gesture_recognizer import GestureRecognizer
+from vision.tracking.hand_tracker import HandTracker
+from vision.gestures.gesture_recognizer import GestureRecognizer
 import math
 
 
