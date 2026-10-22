@@ -71,10 +71,21 @@ void testRecognition() {
         {50, 10}, {90, 80}, {10, 80}, {50, 12}
     };
     auto triShape = recognizeStroke(triPoints);
-    assert(triShape.type == "triangle");
+    // 5. Ambiguous / squiggle test (must return unknown, NOT circle)
+    std::vector<Point> squigglePoints = {
+        {10, 10}, {20, 50}, {30, 20}, {40, 60}, {50, 10}, {60, 45}
+    };
+    auto squiggleShape = recognizeStroke(squigglePoints);
+    assert(squiggleShape.type == "unknown");
 
-    std::cout << "[PASS] testRecognition (Line, Rectangle, Circle, Triangle verified)" << std::endl;
+    // 6. Tiny stroke test
+    std::vector<Point> tinyPoints = {{10, 10}, {12, 11}};
+    auto tinyShape = recognizeStroke(tinyPoints);
+    assert(tinyShape.type == "unknown");
+
+    std::cout << "[PASS] testRecognition (Line, Rectangle, Circle, Triangle, and Unknown verified)" << std::endl;
 }
+
 
 int main() {
     std::cout << "Running AirDoodle C++ Geometry Engine Tests..." << std::endl;

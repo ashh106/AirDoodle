@@ -61,25 +61,26 @@ int main() {
 
             const auto shape = recognizeStroke(points);
             std::ostringstream ss;
-            ss << "{\"id\":\"" << id << "\",\"success\":true,\"result\":{";
-            ss << "\"type\":\"" << shape.type << "\",";
-            ss << "\"geometry\":{";
+            ss << "{\"id\":\"" << id << "\",\"success\":true,\"result\":{\"type\":\"" << shape.type << "\"";
 
             if (shape.type == "line") {
-                ss << "\"x1\":" << shape.x1 << ",\"y1\":" << shape.y1 << ",\"x2\":" << shape.x2 << ",\"y2\":" << shape.y2;
+                ss << ",\"geometry\":{\"x1\":" << shape.x1 << ",\"y1\":" << shape.y1 << ",\"x2\":" << shape.x2 << ",\"y2\":" << shape.y2 << "}}";
             } else if (shape.type == "circle") {
-                ss << "\"cx\":" << shape.cx << ",\"cy\":" << shape.cy << ",\"r\":" << shape.r;
+                ss << ",\"geometry\":{\"cx\":" << shape.cx << ",\"cy\":" << shape.cy << ",\"r\":" << shape.r << "}}";
             } else if (shape.type == "triangle") {
-                ss << "\"points\":[[";
+                ss << ",\"geometry\":{\"points\":[[";
                 ss << shape.trianglePoints[0].x << "," << shape.trianglePoints[0].y << "],[";
                 ss << shape.trianglePoints[1].x << "," << shape.trianglePoints[1].y << "],[";
-                ss << shape.trianglePoints[2].x << "," << shape.trianglePoints[2].y << "]]";
-            } else { // rectangle
-                ss << "\"x\":" << shape.x << ",\"y\":" << shape.y << ",\"width\":" << shape.width << ",\"height\":" << shape.height;
+                ss << shape.trianglePoints[2].x << "," << shape.trianglePoints[2].y << "]]}}";
+            } else if (shape.type == "rectangle") {
+                ss << ",\"geometry\":{\"x\":" << shape.x << ",\"y\":" << shape.y << ",\"width\":" << shape.width << ",\"height\":" << shape.height << "}}";
+            } else {
+                ss << ",\"geometry\":{}}";
             }
-            ss << "}}}\n";
+            ss << "}\n";
             std::cout << ss.str() << std::flush;
             continue;
+
         }
 
         if (action == "bounds") {
