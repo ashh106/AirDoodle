@@ -90,7 +90,13 @@ async def vision_loop(test_mode: bool = False):
                 await broadcast({"type": "penDown", "x": pt["x"], "y": pt["y"]})
             elif is_drawing:
                 current_stroke.append(pt)
-                await broadcast({"type": "cursorMoved", "x": pt["x"], "y": pt["y"]})
+                await broadcast({
+                    "type": "cursorMoved",
+                    "x": pt["x"],
+                    "y": pt["y"],
+                    "hand": "Right",
+                    "action": "drawing"
+                })
                 if step % 100 == 90:
                     is_drawing = False
                     await broadcast({"type": "penUp", "x": pt["x"], "y": pt["y"]})
@@ -98,7 +104,14 @@ async def vision_loop(test_mode: bool = False):
                         await broadcast({"type": "strokeFinished", "points": current_stroke})
                     current_stroke = []
             else:
-                await broadcast({"type": "cursorMoved", "x": pt["x"], "y": pt["y"]})
+                await broadcast({
+                    "type": "cursorMoved",
+                    "x": pt["x"],
+                    "y": pt["y"],
+                    "hand": "Right",
+                    "action": "idle"
+                })
+
 
     # Live Webcam mode
     print("[VisionAgent] Opening local webcam device...")
@@ -108,9 +121,16 @@ async def vision_loop(test_mode: bool = False):
         while True:
             await asyncio.sleep(1.0)
 
+    # Hand gesture state tracking
+    # Right hand: pinch held for ~0.8s (deliberate trigger) then draw until released
+    # Left hand: pinch held for ~0.8s then erase
+    right_pinch_frames = 0
+    left_pinch_frames = 0
+    PINCH_TRIGGER_FRAMES = 12  # approx 0.4-0.6s at 25-30fps
+    is_erasing = False
+
     try:
         while True:
-            # Non-blocking yield for asyncio tasks
             await asyncio.sleep(0.01)
 
             ret, frame = cap.read()
@@ -121,54 +141,98 @@ async def vision_loop(test_mode: bool = False):
             h, w, _ = frame.shape
             hands = tracker.process(frame, draw=False)
 
-            if not hands or not connected_clients:
+            if not hands:
                 if is_drawing:
                     is_drawing = False
                     await broadcast({"type": "penUp", "x": current_stroke[-1]["x"] if current_stroke else 500, "y": current_stroke[-1]["y"] if current_stroke else 350})
                     if len(current_stroke) >= 2:
                         await broadcast({"type": "strokeFinished", "points": current_stroke})
                     current_stroke = []
+                if is_erasing:
+                    is_erasing = False
+                right_pinch_frames = 0
+                left_pinch_frames = 0
+                await broadcast({"type": "handStatus", "handDetected": False, "action": "idle"})
                 continue
 
+            # Prioritize first tracked hand or process primary
             hand = hands[0]
+            handedness = hand.get("handedness", "Right")  # "Left" or "Right"
             landmarks = {idx: (x, y) for idx, x, y in hand["landmarks"]}
 
-            # Index finger tip is landmark 8
             if 8 not in landmarks or 4 not in landmarks:
                 continue
 
             ix, iy = landmarks[8]
 
-            # Mirror horizontal coordinate for natural gesture drawing
+            # In mirrored view (selfie/webcam feed), MediaPipe classifies user's real right hand as "Left" or "Right"
+            # We mirror x for natural screen canvas mapping (moving finger right moves cursor right)
             norm_x = (1.0 - (ix / float(w))) * CANVAS_WIDTH
             norm_y = (iy / float(h)) * CANVAS_HEIGHT
-
-            # Clamp to canvas boundaries
             norm_x = max(0.0, min(CANVAS_WIDTH, norm_x))
             norm_y = max(0.0, min(CANVAS_HEIGHT, norm_y))
-
             point = {"x": round(norm_x, 1), "y": round(norm_y, 1)}
 
-            # Pinch detection (Thumb tip 4 and Index tip 8)
-            pinch_active = recognizer.is_pinch(hand, 4, 8, thresh=45)
+            # Distance between thumb tip (4) and index tip (8)
+            pinch_dist = recognizer.distance(landmarks[4], landmarks[8])
+            is_pinched = pinch_dist < 42.0
 
-            if pinch_active:
-                if not is_drawing:
-                    is_drawing = True
-                    current_stroke = [point]
-                    await broadcast({"type": "penDown", "x": point["x"], "y": point["y"]})
+            action = "idle"
+
+            # Determine whether hand is Right (drawing) or Left (erasing)
+            # Note: in webcam mirror, classification may be opposite, user can use either hand
+            if handedness == "Left":
+                # Left Hand: Erase mode with deliberate hold
+                if is_pinched:
+                    left_pinch_frames += 1
+                    if left_pinch_frames >= PINCH_TRIGGER_FRAMES:
+                        action = "erasing"
+                        is_erasing = True
+                        await broadcast({"type": "eraseAt", "x": point["x"], "y": point["y"], "radius": 24})
+                    else:
+                        action = "waiting"
                 else:
-                    current_stroke.append(point)
-                    await broadcast({"type": "cursorMoved", "x": point["x"], "y": point["y"]})
+                    left_pinch_frames = max(0, left_pinch_frames - 2)
+                    is_erasing = False
+
+                await broadcast({
+                    "type": "cursorMoved",
+                    "x": point["x"],
+                    "y": point["y"],
+                    "hand": "Left",
+                    "action": action
+                })
             else:
-                if is_drawing:
-                    is_drawing = False
-                    await broadcast({"type": "penUp", "x": point["x"], "y": point["y"]})
-                    if len(current_stroke) >= 2:
-                        await broadcast({"type": "strokeFinished", "points": current_stroke})
-                    current_stroke = []
+                # Right Hand: Draw mode with deliberate hold
+                if is_pinched:
+                    right_pinch_frames += 1
+                    if right_pinch_frames >= PINCH_TRIGGER_FRAMES:
+                        action = "drawing"
+                        if not is_drawing:
+                            is_drawing = True
+                            current_stroke = [point]
+                            await broadcast({"type": "penDown", "x": point["x"], "y": point["y"]})
+                        else:
+                            current_stroke.append(point)
+                    else:
+                        action = "waiting"
                 else:
-                    await broadcast({"type": "cursorMoved", "x": point["x"], "y": point["y"]})
+                    right_pinch_frames = max(0, right_pinch_frames - 2)
+                    if is_drawing:
+                        is_drawing = False
+                        await broadcast({"type": "penUp", "x": point["x"], "y": point["y"]})
+                        if len(current_stroke) >= 2:
+                            await broadcast({"type": "strokeFinished", "points": current_stroke})
+                        current_stroke = []
+
+                await broadcast({
+                    "type": "cursorMoved",
+                    "x": point["x"],
+                    "y": point["y"],
+                    "hand": "Right",
+                    "action": action
+                })
+
 
     finally:
         cap.release()
