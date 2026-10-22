@@ -156,9 +156,137 @@ export const intersectsShape = (eraser: Point, radius: number, shape: Shape): bo
 };
 
 /**
+ * Clips a polyline (list of coordinates) against an eraser circle.
+ * Computes exact geometric segment-circle intersections so segments that cross
+ * the circle are trimmed/split even when neither vertex is inside the brush.
+ * Returns an array of preserved polyline runs.
+ */
+export const clipPolylineWithCircle = (
+  pts: Coordinate[],
+  eraser: Point,
+  radius: number
+): Coordinate[][] => {
+  if (pts.length === 0) return [];
+  if (pts.length === 1) {
+    const d = Math.hypot(eraser.x - pts[0][0], eraser.y - pts[0][1]);
+    return d > radius ? [pts] : [];
+  }
+
+  const runs: Coordinate[][] = [];
+  let currentRun: Coordinate[] = [];
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const x0 = pts[i][0];
+    const y0 = pts[i][1];
+    const x1 = pts[i + 1][0];
+    const y1 = pts[i + 1][1];
+
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const lenSq = dx * dx + dy * dy;
+
+    const d0 = Math.hypot(x0 - eraser.x, y0 - eraser.y);
+    const d1 = Math.hypot(x1 - eraser.x, y1 - eraser.y);
+
+    if (lenSq === 0) {
+      if (d0 > radius) {
+        if (currentRun.length === 0) currentRun.push([x0, y0]);
+      } else {
+        if (currentRun.length > 0) {
+          runs.push(currentRun);
+          currentRun = [];
+        }
+      }
+      continue;
+    }
+
+    // Quadratic intersection of P(t) = P0 + t * (P1 - P0) with circle boundary
+    const fx = x0 - eraser.x;
+    const fy = y0 - eraser.y;
+    const A = lenSq;
+    const B = 2 * (fx * dx + fy * dy);
+    const C = fx * fx + fy * fy - radius * radius;
+
+    const discriminant = B * B - 4 * A * C;
+
+    if (discriminant <= 0) {
+      // No intersection with circle boundary
+      if (d0 > radius && d1 > radius) {
+        if (currentRun.length === 0) currentRun.push([x0, y0]);
+        currentRun.push([x1, y1]);
+      } else {
+        if (currentRun.length > 0) {
+          runs.push(currentRun);
+          currentRun = [];
+        }
+      }
+      continue;
+    }
+
+    const sqrtDisc = Math.sqrt(discriminant);
+    const tA = (-B - sqrtDisc) / (2 * A);
+    const tB = (-B + sqrtDisc) / (2 * A);
+
+    const tEnter = Math.min(tA, tB);
+    const tExit = Math.max(tA, tB);
+
+    const hasOverlap = tEnter < 1 && tExit > 0;
+
+    if (!hasOverlap) {
+      if (d0 > radius && d1 > radius) {
+        if (currentRun.length === 0) currentRun.push([x0, y0]);
+        currentRun.push([x1, y1]);
+      } else {
+        if (currentRun.length > 0) {
+          runs.push(currentRun);
+          currentRun = [];
+        }
+      }
+      continue;
+    }
+
+    // Inside portion is (max(0, tEnter), min(1, tExit))
+    const inStart = Math.max(0, tEnter);
+    const inEnd = Math.min(1, tExit);
+
+    // Subsegment 1: from 0 to inStart (outside circle)
+    if (inStart > 0.001) {
+      const enterPt: Coordinate = [
+        Math.round((x0 + inStart * dx) * 10) / 10,
+        Math.round((y0 + inStart * dy) * 10) / 10,
+      ];
+      if (currentRun.length === 0) currentRun.push([x0, y0]);
+      currentRun.push(enterPt);
+      runs.push(currentRun);
+      currentRun = [];
+    } else {
+      if (currentRun.length > 0) {
+        runs.push(currentRun);
+        currentRun = [];
+      }
+    }
+
+    // Subsegment 2: from inEnd to 1 (outside circle)
+    if (inEnd < 0.999) {
+      const exitPt: Coordinate = [
+        Math.round((x0 + inEnd * dx) * 10) / 10,
+        Math.round((y0 + inEnd * dy) * 10) / 10,
+      ];
+      currentRun = [exitPt, [x1, y1]];
+    }
+  }
+
+  if (currentRun.length > 0) {
+    runs.push(currentRun);
+  }
+
+  return runs;
+};
+
+/**
  * Detail Eraser:
- * - For freehand paths: splits/trims the path at the erased region while preserving untouched segments.
- * - For geometric SVG shapes: adds a persistent vector mask cutout.
+ * - For freehand paths: calculates exact segment-to-brush circle intersections and splits/trims paths.
+ * - For geometric SVG shapes: adds a persistent vector mask cutout in local un-rotated coordinates.
  */
 export const applyDetailEraser = (
   eraser: Point,
@@ -177,25 +305,8 @@ export const applyDetailEraser = (
     anyAffected = true;
 
     if (shape.type === "freehand") {
-      // Split freehand points into contiguous untouched runs
       const pts = shape.geometry.points;
-      const runs: Coordinate[][] = [];
-      let currentRun: Coordinate[] = [];
-
-      for (const pt of pts) {
-        const d = Math.hypot(eraser.x - pt[0], eraser.y - pt[1]);
-        if (d > radius) {
-          currentRun.push(pt);
-        } else {
-          if (currentRun.length > 0) {
-            runs.push(currentRun);
-            currentRun = [];
-          }
-        }
-      }
-      if (currentRun.length > 0) {
-        runs.push(currentRun);
-      }
+      const runs = clipPolylineWithCircle(pts, eraser, radius);
 
       // Convert runs into preserved shapes
       runs.forEach((run, index) => {
@@ -216,9 +327,18 @@ export const applyDetailEraser = (
         }
       });
     } else {
-      // Geometric shape: attach persistent vector mask cutout
+      // Geometric shape: attach persistent vector mask cutout in local shape coordinate frame
+      const center = shapeCenter(shape);
+      const local = rotatePoint(eraser, center, -shape.rotation);
       const existingMask = shape.mask || [];
-      const newMask = [...existingMask, { cx: Math.round(eraser.x * 10) / 10, cy: Math.round(eraser.y * 10) / 10, r: radius }];
+      const newMask = [
+        ...existingMask,
+        {
+          cx: Math.round(local.x * 10) / 10,
+          cy: Math.round(local.y * 10) / 10,
+          r: radius,
+        },
+      ];
       result.push({
         ...shape,
         mask: newMask,

@@ -18,7 +18,8 @@ const shapeCenter = (shape: Shape): Point => {
 const pointsAttribute = (points: Coordinate[]) => points.map(([x, y]) => `${x},${y}`).join(" ");
 
 const shapeMarkup = (shape: Shape): string => {
-  const style = `fill="${shape.style.fill}" stroke="${shape.style.stroke}" stroke-width="${shape.style.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"`;
+  const fillVal = shape.style.fill || "none";
+  const style = `fill="${fillVal}" stroke="${shape.style.stroke}" stroke-width="${shape.style.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"`;
   switch (shape.type) {
     case "line": return `<line ${style} x1="${shape.geometry.x1}" y1="${shape.geometry.y1}" x2="${shape.geometry.x2}" y2="${shape.geometry.y2}" />`;
     case "rectangle": return `<rect ${style} x="${shape.geometry.x}" y="${shape.geometry.y}" width="${shape.geometry.width}" height="${shape.geometry.height}" />`;

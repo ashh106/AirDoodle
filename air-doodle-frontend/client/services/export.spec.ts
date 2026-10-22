@@ -83,7 +83,7 @@ describe("Export Service", () => {
     ];
 
     const svg = exportShapesSvg(maskedShapes);
-    expect(svg).toContain('<defs><mask id="mask-rect-masked">');
+    expect(svg).toContain('<defs><mask id="mask-rect-masked" maskUnits="userSpaceOnUse">');
     expect(svg).toContain('<circle cx="80" cy="80" r="15" fill="black" />');
     expect(svg).toContain('mask="url(#mask-rect-masked)"');
 

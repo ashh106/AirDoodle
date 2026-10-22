@@ -78,14 +78,25 @@ export class VisionAgentClient {
             data.type === "penUp" ||
             data.type === "eraseAt" ||
             data.type === "strokeFinished" ||
-            data.type === "handStatus"
+            data.type === "handStatus" ||
+            data.type === "cameraPreview" ||
+            data.type === "cameraError" ||
+            data.type === "agentStatus"
           ) {
             this.onEventCallback?.(data as InputEvent);
-            this.onStatusCallback?.({
-              connected: true,
-              handDetected: data.type === "handStatus" ? data.handDetected : true,
-              statusText: data.action ? `Action: ${data.action}` : "Hand Tracked",
-            });
+            if (data.type === "cameraError") {
+              this.onStatusCallback?.({
+                connected: true,
+                handDetected: false,
+                statusText: data.message || "Camera Error",
+              });
+            } else if (data.type !== "cameraPreview") {
+              this.onStatusCallback?.({
+                connected: true,
+                handDetected: data.type === "handStatus" ? data.handDetected : true,
+                statusText: data.action ? `Action: ${data.action}` : "Hand Tracked",
+              });
+            }
           }
         } catch (err) {
           console.warn("[VisionAgentClient] Error parsing message:", err);

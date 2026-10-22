@@ -17,7 +17,7 @@ import { visionAgent } from "@/services/vision.service";
 import { useAuth } from "@/context/useAuth";
 import { initialShapeState, shapeReducer } from "@/state/shapeReducer";
 import { InputEvent } from "@/types/input";
-import { Shape, ShapeAction, ShapeStyle, Tool } from "@/types/shape";
+import { Point, Shape, ShapeAction, ShapeStyle, Tool } from "@/types/shape";
 import { intersectsShape, applyDetailEraser } from "@/lib/eraserGeometry";
 import { toast } from "sonner";
 
@@ -62,6 +62,9 @@ const ProjectPage = () => {
   const [eraserMode, setEraserMode] = useState<"object" | "detail">("object");
   const [eraserRadius, setEraserRadius] = useState<number>(24);
   const [activeStrokeWidth, setActiveStrokeWidth] = useState<number>(2);
+  const [cameraPreview, setCameraPreview] = useState<string | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [liveHandStroke, setLiveHandStroke] = useState<Point[] | null>(null);
   const handTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const shapes = shapeState.present;
@@ -126,6 +129,9 @@ const ProjectPage = () => {
       visionAgent.disconnect();
       setVisionConnected(false);
       setHandCursor(null);
+      setCameraPreview(null);
+      setCameraError(null);
+      setLiveHandStroke(null);
       if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
       return;
     }
@@ -138,6 +144,8 @@ const ProjectPage = () => {
         setVisionConnected(status.connected);
         if (!status.connected) {
           setHandCursor(null);
+          setCameraPreview(null);
+          setLiveHandStroke(null);
         }
       }
     );
@@ -145,6 +153,9 @@ const ProjectPage = () => {
     return () => {
       visionAgent.disconnect();
       setHandCursor(null);
+      setCameraPreview(null);
+      setCameraError(null);
+      setLiveHandStroke(null);
       if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
     };
   }, [isCameraTracking]);
@@ -206,9 +217,27 @@ const ProjectPage = () => {
   const handleInputEvent = (event: InputEvent) => {
     if (projectPermission === "view") return;
 
-    if (event.type === "cursorMoved") {
+    if (event.type === "cameraPreview") {
+      setCameraPreview(event.image);
+      setCameraError(null);
+    } else if (event.type === "cameraError") {
+      setCameraError(event.message);
+      setCameraPreview(null);
+    } else if (event.type === "penDown") {
+      if (isCameraTracking) {
+        setLiveHandStroke([{ x: event.x, y: event.y }]);
+      }
+    } else if (event.type === "penUp") {
+      setLiveHandStroke(null);
+    } else if (event.type === "cursorMoved") {
       if (!isCameraTracking) return;
       if (event.strokeWidth) setActiveStrokeWidth(event.strokeWidth);
+
+      if (event.action === "drawing") {
+        setLiveHandStroke((prev) => (prev ? [...prev, { x: event.x, y: event.y }] : [{ x: event.x, y: event.y }]));
+      } else {
+        setLiveHandStroke(null);
+      }
 
       setHandCursor({
         x: event.x,
@@ -222,10 +251,12 @@ const ProjectPage = () => {
       if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
       handTimeoutRef.current = setTimeout(() => {
         setHandCursor(null);
+        setLiveHandStroke(null);
       }, 700);
     } else if (event.type === "handStatus") {
       if (!event.handDetected) {
         setHandCursor(null);
+        setLiveHandStroke(null);
         if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
       }
     } else if (event.type === "eraseAt") {
@@ -256,6 +287,7 @@ const ProjectPage = () => {
         }
       }
     } else if (event.type === "strokeFinished") {
+      setLiveHandStroke(null);
       const strokePoints = event.points;
       if (strokePoints.length < 2) return;
 
@@ -269,15 +301,11 @@ const ProjectPage = () => {
         revision: 1,
       };
 
-      if (tool === "pen") {
-        dispatch({ type: "create", shape: freehandShape });
-        collaborationService.sendShapeCreate(freehandShape);
-        setSelectedId(freehandShape.id);
-      } else {
-        dispatch({ type: "create", shape: freehandShape });
-        collaborationService.sendShapeCreate(freehandShape);
-        setSelectedId(freehandShape.id);
+      dispatch({ type: "create", shape: freehandShape });
+      collaborationService.sendShapeCreate(freehandShape);
+      setSelectedId(freehandShape.id);
 
+      if (tool === "draw") {
         recognizeStroke(strokePoints)
           .then((recognized) => {
             if (recognized.type !== "freehand") {
@@ -297,9 +325,19 @@ const ProjectPage = () => {
     dispatch({ type: "delete", id: original.id });
     collaborationService.sendShapeDelete(original.id);
 
-    dispatch({ type: "create", shape: recognized });
-    collaborationService.sendShapeCreate(recognized);
-    setSelectedId(recognized.id);
+    // Ensure recognized shape inherits original stroke color and stroke width, with transparent fill
+    const convertedShape: Shape = {
+      ...recognized,
+      style: {
+        stroke: original.style.stroke || "#ffffff",
+        fill: "none", // Never convert transparent stroke into dark fill
+        strokeWidth: original.style.strokeWidth || 2,
+      },
+    };
+
+    dispatch({ type: "create", shape: convertedShape });
+    collaborationService.sendShapeCreate(convertedShape);
+    setSelectedId(convertedShape.id);
     setPendingRecognition(null);
     toast.success(`Converted to ${recognized.type}`);
   };
@@ -322,17 +360,26 @@ const ProjectPage = () => {
       collaborationService.sendShapeDelete(action.id);
     } else if (action.type === "batch") {
       action.shapes.forEach((s) => collaborationService.sendShapeUpdate(s));
+    } else if (action.type === "update") {
+      collaborationService.sendShapeUpdate(action.shape);
+    } else if (action.type === "updateStyle") {
+      const target = shapes.find((s) => s.id === action.id);
+      if (target) {
+        collaborationService.sendShapeUpdate({
+          ...target,
+          style: { ...target.style, ...action.style },
+          revision: (target.revision || 1) + 1,
+        });
+      }
     } else if (
       action.type === "move" ||
       action.type === "rotate" ||
-      action.type === "scale" ||
-      action.type === "updateStyle" ||
-      action.type === "update"
+      action.type === "scale"
     ) {
-      const updated = shapes.find((s) => s.id === (action.type === "update" ? action.shape.id : action.id));
-      if (updated) {
-        collaborationService.sendShapeUpdate(updated);
-      }
+      setTimeout(() => {
+        const fresh = shapesRef.current.find((s) => s.id === action.id);
+        if (fresh) collaborationService.sendShapeUpdate(fresh);
+      }, 0);
     }
   };
 
@@ -422,6 +469,7 @@ const ProjectPage = () => {
           eraserMode={eraserMode}
           eraserRadius={eraserRadius}
           onEmptyClick={() => setShowProperties(false)}
+          liveHandStroke={liveHandStroke}
         />
       </main>
 
@@ -482,6 +530,8 @@ const ProjectPage = () => {
         onStopTracking={() => setIsCameraTracking(false)}
         visionConnected={visionConnected}
         handState={handCursor ? { handDetected: true, ...handCursor } : null}
+        cameraPreview={cameraPreview}
+        cameraError={cameraError}
       />
 
 

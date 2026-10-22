@@ -24,7 +24,8 @@ const pointsAttribute = (points: Coordinate[]) => points.map(([x, y]) => `${x},$
 
 const shapeMarkup = (shape: Shape): string => {
   const maskAttr = shape.mask && shape.mask.length > 0 ? ` mask="url(#mask-${shape.id})"` : "";
-  const style = `fill="${shape.style.fill}" stroke="${shape.style.stroke}" stroke-width="${shape.style.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"${maskAttr}`;
+  const fillVal = shape.style.fill || "none";
+  const style = `fill="${fillVal}" stroke="${shape.style.stroke}" stroke-width="${shape.style.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"${maskAttr}`;
   switch (shape.type) {
     case "line":
       return `<line ${style} x1="${shape.geometry.x1}" y1="${shape.geometry.y1}" x2="${shape.geometry.x2}" y2="${shape.geometry.y2}" />`;
@@ -55,7 +56,7 @@ export const exportShapesSvg = (shapes: Shape[], options: ExportSvgOptions = {})
     .filter((s) => s.mask && s.mask.length > 0)
     .map(
       (s) =>
-        `<mask id="mask-${s.id}"><rect x="-5000" y="-5000" width="10000" height="10000" fill="white" />${s
+        `<mask id="mask-${s.id}" maskUnits="userSpaceOnUse"><rect x="-5000" y="-5000" width="10000" height="10000" fill="white" />${s
           .mask!.map((m) => `<circle cx="${m.cx}" cy="${m.cy}" r="${m.r}" fill="black" />`)
           .join("")}</mask>`
     )
@@ -146,5 +147,5 @@ export const downloadFile = (blob: Blob, filename: string): void => {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(url), 100);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
 };

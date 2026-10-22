@@ -11,6 +11,7 @@ import asyncio
 import argparse
 import time
 import math
+import base64
 from typing import Set
 
 # Ensure AirDoodle root is in Python path for vision module imports
@@ -114,24 +115,51 @@ async def vision_loop(test_mode: bool = False):
                     "strokeWidth": 2
                 })
 
-    # Live Webcam mode
+    # Live Webcam mode — OpenCV is the authoritative hardware capture owner
     print("[VisionAgent] Opening local webcam device...")
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("[VisionAgent] Warning: Could not open webcam device 0. Falling back to idle standby.")
+    cap = None
+    opened_index = -1
+    backend_name = "default"
+
+    # On Windows, try DirectShow (cv2.CAP_DSHOW) first to prevent exclusive locks, then default
+    for idx in [0, 1]:
+        if sys.platform.startswith("win"):
+            test_cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            if test_cap.isOpened():
+                cap = test_cap
+                opened_index = idx
+                backend_name = "DSHOW"
+                break
+            test_cap.release()
+        test_cap = cv2.VideoCapture(idx)
+        if test_cap.isOpened():
+            cap = test_cap
+            opened_index = idx
+            backend_name = "DEFAULT"
+            break
+        test_cap.release()
+
+    if not cap or not cap.isOpened():
+        error_msg = "Could not open webcam device (devices 0 and 1 failed). Camera may be in use by another application or disconnected."
+        print(f"[VisionAgent] Error: {error_msg}")
         while True:
             await asyncio.sleep(1.0)
+            if connected_clients:
+                await broadcast({"type": "cameraError", "message": error_msg})
+    else:
+        print(f"[VisionAgent] Webcam opened successfully on device {opened_index} (Backend: {backend_name}).")
 
     # State tracking per hand
     right_hold_frames = 0
     left_hold_frames = 0
     right_exit_frames = 0
     left_exit_frames = 0
-    HOLD_TRIGGER_FRAMES = 18  # approx 0.6-0.8s at 25-30fps
+    HOLD_TRIGGER_FRAMES = 16  # approx 0.5-0.7s at 25-30fps
     is_erasing = False
 
     # Diagnostics state
     last_diag_time = time.time()
+    last_preview_time = 0.0
     frames_captured = 0
     events_sent = 0
     last_hands_count = 0
@@ -149,9 +177,21 @@ async def vision_loop(test_mode: bool = False):
             # Mirror horizontally for natural webcam selfie interaction
             frame = cv2.flip(frame, 1)
             h, w, _ = frame.shape
+            now = time.time()
+
+            # Stream downscaled camera preview (~10 fps) to connected browser clients
+            # Eliminates competing getUserMedia hardware locks on Windows
+            if connected_clients and (now - last_preview_time >= 0.09):
+                try:
+                    small = cv2.resize(frame, (320, 240))
+                    _, buf = cv2.imencode('.jpg', small, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
+                    b64_str = base64.b64encode(buf).decode('ascii')
+                    await broadcast({"type": "cameraPreview", "image": f"data:image/jpeg;base64,{b64_str}"})
+                    last_preview_time = now
+                except Exception as e:
+                    pass
 
             hands = tracker.process(frame, draw=False)
-            now = time.time()
 
             # Throttled diagnostics every 3.0 seconds
             if now - last_diag_time >= 3.0:

@@ -23,6 +23,7 @@ interface CanvasProps {
   eraserMode?: EraserMode;
   eraserRadius?: number;
   onEmptyClick?: () => void;
+  liveHandStroke?: Point[] | null;
 }
 
 type Bounds = { x: number; y: number; width: number; height: number };
@@ -107,9 +108,9 @@ const makeShape = (type: ShapeType, start: Point, end: Point): Shape => {
 const renderShape = (shape: Shape) => {
   const maskAttr = shape.mask && shape.mask.length > 0 ? `url(#mask-${shape.id})` : undefined;
   const style = {
-    stroke: shape.style.stroke,
-    fill: shape.style.fill,
-    strokeWidth: shape.style.strokeWidth,
+    stroke: shape.style.stroke || "#ffffff",
+    fill: shape.style.fill || "none",
+    strokeWidth: shape.style.strokeWidth || 2,
     strokeLinejoin: "round" as const,
     strokeLinecap: "round" as const,
     mask: maskAttr,
@@ -136,6 +137,7 @@ const Canvas: React.FC<CanvasProps> = ({
   eraserMode = "object",
   eraserRadius = 24,
   onEmptyClick,
+  liveHandStroke,
 }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -335,7 +337,16 @@ const Canvas: React.FC<CanvasProps> = ({
             <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="1" />
           </pattern>
           {shapes.filter(s => s.mask && s.mask.length > 0).map(s => (
-            <mask key={`mask-${s.id}`} id={`mask-${s.id}`}>
+            <mask
+              key={`mask-${s.id}`}
+              id={`mask-${s.id}`}
+              maskUnits="userSpaceOnUse"
+              maskContentUnits="userSpaceOnUse"
+              x="-5000"
+              y="-5000"
+              width="10000"
+              height="10000"
+            >
               <rect x="-5000" y="-5000" width="10000" height="10000" fill="white" />
               {s.mask!.map((m, idx) => (
                 <circle key={idx} cx={m.cx} cy={m.cy} r={m.r} fill="black" />
@@ -355,6 +366,16 @@ const Canvas: React.FC<CanvasProps> = ({
         ))}
         {drag?.mode === "stroke" && (
           <polyline points={drag.points.map(point => `${point.x},${point.y}`).join(" ")} fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" />
+        )}
+        {liveHandStroke && liveHandStroke.length > 1 && (
+          <polyline
+            points={liveHandStroke.map(point => `${point.x},${point.y}`).join(" ")}
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth={handCursor?.strokeWidth || 4}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         )}
         {drag?.mode === "create" && (
           <g opacity="0.6">{renderShape(makeShape(drag.shapeType, drag.start, drag.current))}</g>

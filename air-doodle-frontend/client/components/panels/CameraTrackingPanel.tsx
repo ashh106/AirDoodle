@@ -8,6 +8,8 @@ interface CameraTrackingPanelProps {
   onStartTracking: () => void;
   onStopTracking: () => void;
   visionConnected: boolean;
+  cameraPreview?: string | null;
+  cameraError?: string | null;
   handState?: {
     handDetected: boolean;
     action: "idle" | "waiting" | "drawing" | "erasing" | "adjusting_size";
@@ -22,46 +24,12 @@ export const CameraTrackingPanel: React.FC<CameraTrackingPanelProps> = ({
   onStartTracking,
   onStopTracking,
   visionConnected,
+  cameraPreview,
+  cameraError,
   handState,
 }) => {
   const [panelOpen, setPanelOpen] = useState(true);
   const [showGuide, setShowGuide] = useState(false);
-  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-
-  // When tracking is active, open local webcam feed for user feedback
-  useEffect(() => {
-    if (!isTracking) {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-      setHasPermission(null);
-      return;
-    }
-
-    navigator.mediaDevices
-      ?.getUserMedia({ video: { width: 320, height: 240 } })
-      .then((stream) => {
-        streamRef.current = stream;
-        setHasPermission(true);
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      })
-      .catch((err) => {
-        console.warn("[CameraTrackingPanel] Local camera preview unavailable:", err);
-        setHasPermission(false);
-      });
-
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-    };
-  }, [isTracking]);
 
   // Meaningful state text
   const stateLabel = !visionConnected
@@ -146,21 +114,30 @@ export const CameraTrackingPanel: React.FC<CameraTrackingPanelProps> = ({
                 exit={{ height: 0, opacity: 0 }}
                 className="w-full overflow-hidden rounded-2xl bg-black/60 relative border border-border/30"
               >
-                {hasPermission === false ? (
+                {cameraError ? (
                   <div className="p-4 text-center text-xs text-muted-foreground space-y-1">
                     <AlertCircle className="w-5 h-5 text-amber-400 mx-auto" />
-                    <p className="font-semibold text-foreground">Webcam Access Denied</p>
-                    <p className="text-[10px]">Mouse drawing remains fully functional.</p>
+                    <p className="font-semibold text-foreground">Webcam Device Issue</p>
+                    <p className="text-[10px] leading-tight text-amber-300">{cameraError}</p>
+                    <p className="text-[9.5px] text-muted-foreground">Mouse drawing remains fully functional.</p>
                   </div>
                 ) : (
-                  <div className="aspect-[4/3] w-full relative flex items-center justify-center">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-full object-cover -scale-x-100 rounded-2xl"
-                    />
+                  <div className="aspect-[4/3] w-full relative flex items-center justify-center bg-zinc-950">
+                    {cameraPreview ? (
+                      <img
+                        src={cameraPreview}
+                        alt="Webcam hand tracking preview"
+                        className="w-full h-full object-cover rounded-2xl"
+                      />
+                    ) : (
+                      <div className="p-4 text-center text-xs text-muted-foreground space-y-1">
+                        <Video className="w-5 h-5 text-violet-400 mx-auto animate-pulse" />
+                        <p className="font-medium text-foreground text-[11px]">
+                          {visionConnected ? "Awaiting camera frames..." : "Waiting for vision agent..."}
+                        </p>
+                        <p className="text-[9.5px]">OpenCV capture running locally.</p>
+                      </div>
+                    )}
                     <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/70 backdrop-blur-md text-[9px] font-mono text-emerald-400 border border-white/10">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                       {visionConnected ? "Vision Agent Linked" : "Connecting Agent..."}

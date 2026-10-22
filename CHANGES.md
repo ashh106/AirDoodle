@@ -413,3 +413,59 @@ This document provides a complete, detailed record of all discovery, audit, clea
   1. Verify OpenCV index 0 opens the physical USB/integrated camera in ambient room lighting.
   2. Verify physical two-hand simultaneous tracking (left hand adjusting eraser radius, right hand drawing).
   3. Verify optical hand occlusion tolerance when hands cross in front of the camera lens.
+
+---
+
+## 15. Critical Runtime Bug Fixes & Architecture Hardening (Phase V — October 22, 2026)
+
+### 1. Webcam Ownership Conflict & Live Hand-Controlled Drawing
+- **Root Cause (Windows Exclusive Camera Lock):** On Windows, when `navigator.mediaDevices.getUserMedia` was invoked by `CameraTrackingPanel.tsx` in Chrome/Edge, the operating system granted exclusive hardware capture lock to the browser process. Consequently, OpenCV's `cv2.VideoCapture(0)` in `vision/agent_server.py` threw hardware access errors or failed silently to open. Furthermore, in-progress hand strokes were not rendered live on the canvas, appearing only after stroke finalization.
+- **Authoritative Capture Architecture:**
+  - Designated Python OpenCV (`agent_server.py`) as the single authoritative hardware capture owner.
+  - Initialized OpenCV with DirectShow (`cv2.CAP_DSHOW` on Windows) with automatic fallback from device index 0 to 1, logging detailed `VideoCapture.isOpened()` status and hardware errors.
+  - Broadcasts throttled diagnostic status (`agentStatus`), hardware errors (`cameraError`), and a lightweight downscaled JPEG preview (`cameraPreview` base64, ~320x240, 50% JPEG quality at ~10 FPS) over local WebSocket loopback (`ws://127.0.0.1:8765`).
+  - Removed browser `getUserMedia` and HTML `<video>` from `CameraTrackingPanel.tsx` entirely. Browser renders the secure local loopback JPEG stream in an `<img>` tag without competing for hardware handles or streaming raw video through cloud or collaborative Socket.IO channels.
+  - Implemented `liveHandStroke` state in `Project.tsx` and `<Canvas>` SVG rendering so right-hand drawing gestures produce an active, visible polyline path following the index fingertip in real-time.
+
+### 2. Line-Segment Circle Clipping for Detail Eraser & Vector Masks
+- **Root Cause (Vertex-Only Point Filtering):** Previously, `applyDetailEraser` only checked whether existing polyline points fell inside the eraser radius. If a long vector line segment passed completely through the eraser circle with both endpoints outside ($d > r$), the segment was completely ignored. Additionally, rotated shape masks did not account for shape rotation angles.
+- **Targeted Mathematical Fix:**
+  - Implemented exact mathematical segment-to-brush-circle clipping in `eraserGeometry.ts` (`clipPolylineWithCircle`). Computes parametric intersection points along segment $P(t) = A + t(B - A)$ using quadratic equation $a t^2 + b t + c = 0$. Accurately splits crossing segments into preserved sub-strokes even when neither endpoint lies inside the brush.
+  - For closed shapes (`rectangle`, `circle`, `triangle`), converts eraser brush points into the shape's local un-rotated coordinate frame (`rotatePoint(eraser, center, -shape.rotation)`).
+  - Appends persistent SVG mask cutouts with explicit `maskUnits="userSpaceOnUse"`.
+  - Added comprehensive test suite in `eraserGeometry.spec.ts` covering non-endpoint crossing segments, multiple sequential erasures, and rotated masks (10/10 tests pass).
+
+### 3. Dark/Black Shape Conversion & Recognition Styling
+- **Root Cause (SVG Spec Default Fill):** SVG specification dictates that elements lacking an explicit `fill` attribute default to solid black (`#000000`). If a converted shape lacked `style.fill`, browsers rendered it solid black.
+- **Targeted Fix:**
+  - Enforced `fill: shape.style.fill || "none"` across `Canvas.tsx`, `export.service.ts`, and `svgExport.ts`.
+  - In `Project.tsx`, when converting recognized strokes, inherited original stroke color and stroke width while strictly forcing `fill: "none"` unless explicitly chosen by the user.
+  - Restricted recognition triggers strictly to `tool === "draw"`. Freehand drawing with `tool === "pen"` preserves organic freehand strokes without conversion prompts.
+  - Ambiguous or low-confidence recognition results preserve the original freehand stroke without destructive fallback to default shapes.
+
+### 4. C++ Native Geometry Engine Bridge Verification
+- Verified bi-directional Node-to-C++ JSON-lines subprocess pipeline (`server/services/geometry-engine.ts` spawning `cpp-engine/build/airdoodle-geometry.exe`).
+- Tagged responses with `engine: "native-cpp"` vs `engine: "js-fallback"` to differentiate native execution.
+- Deterministic test cases for lines, rectangles, circles, triangles, and ambiguous squiggly strokes verified against the compiled native engine binary.
+
+### 5. Export Verification & Properties Panel Interactivity
+- **SVG Export:** Validated vector output with `<defs><mask id="..." maskUnits="userSpaceOnUse">`, explicit canvas background, and `fill || "none"`.
+- **PNG/JPEG Export & Downloads:** Extended `downloadFile` object URL revocation timeout from 100ms to 2000ms to guarantee complete browser download initiation before URL disposal.
+- **Properties Panel:** Maintained `e.stopPropagation()` on all panel controls so interactive clicks do not collapse the panel. Canvas empty space clicks trigger `onEmptyClick` to collapse the panel cleanly. Fixed collaboration broadcast in `Project.tsx` so style updates send the fresh modified shape instead of pre-dispatch state.
+
+### 6. Full Verification Matrix
+| Test Suite | Command | Result | Notes |
+| :--- | :--- | :--- | :--- |
+| **Frontend Tests** | `npm test` | **PASS (Exit 0)** | 32/32 tests passed across 6 test files |
+| **Frontend Typecheck** | `npm run typecheck` | **PASS (Exit 0)** | 0 TypeScript errors |
+| **Frontend Build** | `npm run build` | **PASS (Exit 0)** | Clean Vite SPA and SSR server builds |
+| **C++ Unit Tests** | `.\cpp-engine\build\test_geometry.exe` | **PASS (Exit 0)** | All distance, intersection, and recognition checks pass |
+| **Python Unit Tests** | `python -m unittest discover tests` | **PASS (Exit 0)** | 4/4 tests pass |
+| **Git Diff Check** | `git diff --check` | **PASS (Exit 0)** | Clean diff with zero whitespace warnings |
+
+### 7. Physical Hardware Checks Requiring Manual User Action
+- **Physical Webcam Device Handle:** Automated test suite validates mock and simulated packet streaming. Because hardware webcam devices cannot be physically accessed by headless test runners, the user should:
+  1. Ensure no other application (e.g. Zoom, Teams, Camera app) is holding an exclusive handle on camera device index 0.
+  2. Launch `python vision/agent_server.py` in one terminal and `npm run dev` in `air-doodle-frontend`.
+  3. Toggle "Start Camera" in the bottom-right panel and confirm live video appears in the thumbnail.
+  4. Perform a right-hand index pinch to verify real-time continuous drawing following the fingertip.

@@ -25,5 +25,8 @@ export type InputEvent =
       message?: string;
       strokeWidth?: number;
       radius?: number;
-    };
+    }
+  | { type: "cameraPreview"; image: string }
+  | { type: "cameraError"; message: string }
+  | { type: "agentStatus"; status: string; camera?: { opened: boolean; deviceIndex: number; backend: string } };
 
