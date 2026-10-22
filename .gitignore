@@ -46,7 +46,7 @@ cpp-engine/bin/
 !.env.example
 
 # Local runtime database and generated user data
-air-doodle-frontend/server/data/air-doodle-db.json
+air-doodle-frontend/server/data/*.json
 air-doodle-db.json
 *.sqlite
 *.db
