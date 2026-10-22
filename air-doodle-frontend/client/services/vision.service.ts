@@ -28,6 +28,9 @@ export class VisionAgentClient {
     this.initSocket();
   }
 
+  private eventCount = 0;
+  private lastDiagTime = Date.now();
+
   private initSocket() {
     if (typeof window === "undefined" || !this.shouldConnect) return;
 
@@ -47,6 +50,7 @@ export class VisionAgentClient {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
+        console.log(`[VisionService] Connected to vision server at ${this.url}`);
         this.onStatusCallback?.({
           connected: true,
           handDetected: false,
@@ -57,6 +61,17 @@ export class VisionAgentClient {
       this.ws.onmessage = (messageEvent) => {
         try {
           const data = JSON.parse(messageEvent.data);
+          this.eventCount++;
+          const now = Date.now();
+          if (now - this.lastDiagTime >= 3000) {
+            const rate = (this.eventCount / ((now - this.lastDiagTime) / 1000)).toFixed(1);
+            console.log(
+              `[VisionService Diagnostics] Event rate: ${rate}/s | Last: ${data.type} | Hand: ${data.hand || "N/A"} | Action: ${data.action || "N/A"}`
+            );
+            this.eventCount = 0;
+            this.lastDiagTime = now;
+          }
+
           if (
             data.type === "cursorMoved" ||
             data.type === "penDown" ||
@@ -77,7 +92,8 @@ export class VisionAgentClient {
         }
       };
 
-      this.ws.onerror = () => {
+      this.ws.onerror = (e) => {
+        console.warn("[VisionService Diagnostics] WebSocket error encountered. Ensure vision agent is running at", this.url);
         this.onStatusCallback?.({
           connected: false,
           handDetected: false,

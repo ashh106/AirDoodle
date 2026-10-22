@@ -65,7 +65,7 @@ async def broadcast(event: dict):
 async def vision_loop(test_mode: bool = False):
     global is_drawing, current_stroke
 
-    tracker = HandTracker(max_hands=1, detection_confidence=0.6, tracking_confidence=0.6)
+    tracker = HandTracker(max_hands=2, detection_confidence=0.6, tracking_confidence=0.6)
     recognizer = GestureRecognizer()
 
     if test_mode:
@@ -87,7 +87,7 @@ async def vision_loop(test_mode: bool = False):
             if step % 100 == 10:
                 is_drawing = True
                 current_stroke = [pt]
-                await broadcast({"type": "penDown", "x": pt["x"], "y": pt["y"]})
+                await broadcast({"type": "penDown", "x": pt["x"], "y": pt["y"], "strokeWidth": 4})
             elif is_drawing:
                 current_stroke.append(pt)
                 await broadcast({
@@ -95,13 +95,14 @@ async def vision_loop(test_mode: bool = False):
                     "x": pt["x"],
                     "y": pt["y"],
                     "hand": "Right",
-                    "action": "drawing"
+                    "action": "drawing",
+                    "strokeWidth": 4
                 })
                 if step % 100 == 90:
                     is_drawing = False
                     await broadcast({"type": "penUp", "x": pt["x"], "y": pt["y"]})
                     if len(current_stroke) >= 2:
-                        await broadcast({"type": "strokeFinished", "points": current_stroke})
+                        await broadcast({"type": "strokeFinished", "points": current_stroke, "strokeWidth": 4})
                     current_stroke = []
             else:
                 await broadcast({
@@ -109,9 +110,9 @@ async def vision_loop(test_mode: bool = False):
                     "x": pt["x"],
                     "y": pt["y"],
                     "hand": "Right",
-                    "action": "idle"
+                    "action": "idle",
+                    "strokeWidth": 2
                 })
-
 
     # Live Webcam mode
     print("[VisionAgent] Opening local webcam device...")
@@ -121,13 +122,19 @@ async def vision_loop(test_mode: bool = False):
         while True:
             await asyncio.sleep(1.0)
 
-    # Hand gesture state tracking
-    # Right hand: pinch held for ~0.8s (deliberate trigger) then draw until released
-    # Left hand: pinch held for ~0.8s then erase
-    right_pinch_frames = 0
-    left_pinch_frames = 0
-    PINCH_TRIGGER_FRAMES = 12  # approx 0.4-0.6s at 25-30fps
+    # State tracking per hand
+    right_hold_frames = 0
+    left_hold_frames = 0
+    right_exit_frames = 0
+    left_exit_frames = 0
+    HOLD_TRIGGER_FRAMES = 18  # approx 0.6-0.8s at 25-30fps
     is_erasing = False
+
+    # Diagnostics state
+    last_diag_time = time.time()
+    frames_captured = 0
+    events_sent = 0
+    last_hands_count = 0
 
     try:
         while True:
@@ -138,101 +145,187 @@ async def vision_loop(test_mode: bool = False):
                 await asyncio.sleep(0.05)
                 continue
 
+            frames_captured += 1
+            # Mirror horizontally for natural webcam selfie interaction
+            frame = cv2.flip(frame, 1)
             h, w, _ = frame.shape
+
             hands = tracker.process(frame, draw=False)
+            now = time.time()
+
+            # Throttled diagnostics every 3.0 seconds
+            if now - last_diag_time >= 3.0:
+                fps = frames_captured / (now - last_diag_time)
+                print(f"[VisionAgent Diagnostics] FPS: {fps:.1f} | Frame: {w}x{h} | Hands Detected: {len(hands)} | "
+                      f"Drawing: {is_drawing} | Erasing: {is_erasing} | Clients: {len(connected_clients)}")
+                last_diag_time = now
+                frames_captured = 0
 
             if not hands:
                 if is_drawing:
                     is_drawing = False
-                    await broadcast({"type": "penUp", "x": current_stroke[-1]["x"] if current_stroke else 500, "y": current_stroke[-1]["y"] if current_stroke else 350})
+                    end_pt = current_stroke[-1] if current_stroke else {"x": 500.0, "y": 350.0}
+                    await broadcast({"type": "penUp", "x": end_pt["x"], "y": end_pt["y"]})
                     if len(current_stroke) >= 2:
-                        await broadcast({"type": "strokeFinished", "points": current_stroke})
+                        await broadcast({"type": "strokeFinished", "points": current_stroke, "strokeWidth": 2})
                     current_stroke = []
                 if is_erasing:
                     is_erasing = False
-                right_pinch_frames = 0
-                left_pinch_frames = 0
+                right_hold_frames = 0
+                left_hold_frames = 0
+                right_exit_frames = 0
+                left_exit_frames = 0
                 await broadcast({"type": "handStatus", "handDetected": False, "action": "idle"})
                 continue
 
-            # Prioritize first tracked hand or process primary
-            hand = hands[0]
-            handedness = hand.get("handedness", "Right")  # "Left" or "Right"
-            landmarks = {idx: (x, y) for idx, x, y in hand["landmarks"]}
+            # Process detected hands
+            for hand in hands:
+                landmarks_list = hand["landmarks"]
+                if len(landmarks_list) != 21:
+                    continue
 
-            if 8 not in landmarks or 4 not in landmarks:
-                continue
+                landmarks = {idx: (lx, ly) for idx, lx, ly in landmarks_list}
+                if 8 not in landmarks or 4 not in landmarks or 0 not in landmarks:
+                    continue
 
-            ix, iy = landmarks[8]
+                # In mirrored view, MediaPipe's 'Left' label corresponds to the user's physical Right hand
+                raw_label = hand.get("handedness", "Right")
+                physical_hand = "Right" if raw_label == "Left" else "Left"
 
-            # In mirrored view (selfie/webcam feed), MediaPipe classifies user's real right hand as "Left" or "Right"
-            # We mirror x for natural screen canvas mapping (moving finger right moves cursor right)
-            norm_x = (1.0 - (ix / float(w))) * CANVAS_WIDTH
-            norm_y = (iy / float(h)) * CANVAS_HEIGHT
-            norm_x = max(0.0, min(CANVAS_WIDTH, norm_x))
-            norm_y = max(0.0, min(CANVAS_HEIGHT, norm_y))
-            point = {"x": round(norm_x, 1), "y": round(norm_y, 1)}
+                # Landmark 8: Index fingertip
+                ix, iy = landmarks[8]
 
-            # Distance between thumb tip (4) and index tip (8)
-            pinch_dist = recognizer.distance(landmarks[4], landmarks[8])
-            is_pinched = pinch_dist < 42.0
+                # Map directly to 1000x700 canvas space (already flipped horizontally)
+                norm_x = (ix / float(w)) * CANVAS_WIDTH
+                norm_y = (iy / float(h)) * CANVAS_HEIGHT
+                norm_x = max(0.0, min(CANVAS_WIDTH, norm_x))
+                norm_y = max(0.0, min(CANVAS_HEIGHT, norm_y))
+                point = {"x": round(norm_x, 1), "y": round(norm_y, 1)}
 
-            action = "idle"
+                # Palm scale calibration (wrist [0] to middle finger MCP [9])
+                palm_scale = math.hypot(landmarks[9][0] - landmarks[0][0], landmarks[9][1] - landmarks[0][1])
+                if palm_scale < 10.0:
+                    palm_scale = 100.0
 
-            # Determine whether hand is Right (drawing) or Left (erasing)
-            # Note: in webcam mirror, classification may be opposite, user can use either hand
-            if handedness == "Left":
-                # Left Hand: Erase mode with deliberate hold
-                if is_pinched:
-                    left_pinch_frames += 1
-                    if left_pinch_frames >= PINCH_TRIGGER_FRAMES:
-                        action = "erasing"
-                        is_erasing = True
-                        await broadcast({"type": "eraseAt", "x": point["x"], "y": point["y"], "radius": 24})
-                    else:
-                        action = "waiting"
-                else:
-                    left_pinch_frames = max(0, left_pinch_frames - 2)
-                    is_erasing = False
+                # Calibrated thumb-to-index distance
+                thumb_tip = landmarks[4]
+                index_tip = landmarks[8]
+                raw_dist = math.hypot(index_tip[0] - thumb_tip[0], index_tip[1] - thumb_tip[1])
+                norm_dist = raw_dist / palm_scale
 
-                await broadcast({
-                    "type": "cursorMoved",
-                    "x": point["x"],
-                    "y": point["y"],
-                    "hand": "Left",
-                    "action": action
-                })
-            else:
-                # Right Hand: Draw mode with deliberate hold
-                if is_pinched:
-                    right_pinch_frames += 1
-                    if right_pinch_frames >= PINCH_TRIGGER_FRAMES:
-                        action = "drawing"
-                        if not is_drawing:
-                            is_drawing = True
-                            current_stroke = [point]
-                            await broadcast({"type": "penDown", "x": point["x"], "y": point["y"]})
+                # Pinch is detected when fingertips are close relative to palm size
+                is_pinched = norm_dist < 0.28
+                is_wide_open = norm_dist > 0.58
+
+                if physical_hand == "Right":
+                    # Right hand = Drawing mode
+                    if is_pinched:
+                        right_exit_frames = 0
+                        right_hold_frames += 1
+                        if right_hold_frames >= HOLD_TRIGGER_FRAMES:
+                            action = "drawing"
+                            # Dynamic stroke width from finger separation (range 2 to 20 px)
+                            stroke_width = max(2, min(24, int(2 + (norm_dist - 0.12) * 50)))
+                            if not is_drawing:
+                                is_drawing = True
+                                current_stroke = [point]
+                                await broadcast({"type": "penDown", "x": point["x"], "y": point["y"], "strokeWidth": stroke_width})
+                            else:
+                                current_stroke.append(point)
                         else:
-                            current_stroke.append(point)
+                            action = "waiting"
+                            stroke_width = 2
                     else:
-                        action = "waiting"
+                        if is_drawing:
+                            if is_wide_open:
+                                right_exit_frames += 1
+                                if right_exit_frames >= 4:
+                                    is_drawing = False
+                                    action = "idle"
+                                    await broadcast({"type": "penUp", "x": point["x"], "y": point["y"]})
+                                    if len(current_stroke) >= 2:
+                                        await broadcast({"type": "strokeFinished", "points": current_stroke, "strokeWidth": 2})
+                                    current_stroke = []
+                                    right_hold_frames = 0
+                                else:
+                                    # Continue stroke with dynamic width
+                                    action = "drawing"
+                                    stroke_width = max(2, min(24, int(2 + (norm_dist - 0.12) * 50)))
+                                    current_stroke.append(point)
+                            else:
+                                right_exit_frames = 0
+                                action = "drawing"
+                                stroke_width = max(2, min(24, int(2 + (norm_dist - 0.12) * 50)))
+                                current_stroke.append(point)
+                        else:
+                            right_hold_frames = max(0, right_hold_frames - 2)
+                            action = "idle"
+                            stroke_width = max(2, min(24, int(2 + (norm_dist - 0.12) * 50)))
+
+                    await broadcast({
+                        "type": "cursorMoved",
+                        "x": point["x"],
+                        "y": point["y"],
+                        "hand": "Right",
+                        "action": action,
+                        "strokeWidth": stroke_width
+                    })
+
                 else:
-                    right_pinch_frames = max(0, right_pinch_frames - 2)
-                    if is_drawing:
-                        is_drawing = False
-                        await broadcast({"type": "penUp", "x": point["x"], "y": point["y"]})
-                        if len(current_stroke) >= 2:
-                            await broadcast({"type": "strokeFinished", "points": current_stroke})
-                        current_stroke = []
+                    # Left hand = Erasing mode
+                    eraser_radius = max(10, min(60, int(14 + (norm_dist - 0.12) * 75)))
 
-                await broadcast({
-                    "type": "cursorMoved",
-                    "x": point["x"],
-                    "y": point["y"],
-                    "hand": "Right",
-                    "action": action
-                })
+                    if is_pinched:
+                        left_exit_frames = 0
+                        left_hold_frames += 1
+                        if left_hold_frames >= HOLD_TRIGGER_FRAMES:
+                            action = "erasing"
+                            is_erasing = True
+                            await broadcast({
+                                "type": "eraseAt",
+                                "x": point["x"],
+                                "y": point["y"],
+                                "radius": eraser_radius
+                            })
+                        else:
+                            action = "waiting"
+                    else:
+                        if is_erasing:
+                            if is_wide_open:
+                                left_exit_frames += 1
+                                if left_exit_frames >= 4:
+                                    is_erasing = False
+                                    action = "idle"
+                                    left_hold_frames = 0
+                                else:
+                                    action = "erasing"
+                                    await broadcast({
+                                        "type": "eraseAt",
+                                        "x": point["x"],
+                                        "y": point["y"],
+                                        "radius": eraser_radius
+                                    })
+                            else:
+                                left_exit_frames = 0
+                                action = "erasing"
+                                await broadcast({
+                                    "type": "eraseAt",
+                                    "x": point["x"],
+                                    "y": point["y"],
+                                    "radius": eraser_radius
+                                })
+                        else:
+                            left_hold_frames = max(0, left_hold_frames - 2)
+                            action = "idle"
 
+                    await broadcast({
+                        "type": "cursorMoved",
+                        "x": point["x"],
+                        "y": point["y"],
+                        "hand": "Left",
+                        "action": action,
+                        "radius": eraser_radius
+                    })
 
     finally:
         cap.release()
