@@ -18,7 +18,9 @@ import { useAuth } from "@/context/useAuth";
 import { initialShapeState, shapeReducer } from "@/state/shapeReducer";
 import { InputEvent } from "@/types/input";
 import { Shape, ShapeAction, ShapeStyle, Tool } from "@/types/shape";
+import { intersectsShape, applyDetailEraser } from "@/lib/eraserGeometry";
 import { toast } from "sonner";
+
 
 const ProjectPage = () => {
   const { id } = useParams<{ id: string }>();
@@ -47,12 +49,24 @@ const ProjectPage = () => {
   // Local vision camera state
   const [isCameraTracking, setIsCameraTracking] = useState(false);
   const [visionConnected, setVisionConnected] = useState(false);
-  const [handCursor, setHandCursor] = useState<{ x: number; y: number; hand: "Right" | "Left"; action: "idle" | "waiting" | "drawing" | "erasing" } | null>(null);
+  const [handCursor, setHandCursor] = useState<{
+    x: number;
+    y: number;
+    hand: "Right" | "Left";
+    action: "idle" | "waiting" | "drawing" | "erasing" | "adjusting_size";
+    strokeWidth?: number;
+    radius?: number;
+  } | null>(null);
+
+  // Eraser modes & brush sizes
+  const [eraserMode, setEraserMode] = useState<"object" | "detail">("object");
+  const [eraserRadius, setEraserRadius] = useState<number>(24);
+  const [activeStrokeWidth, setActiveStrokeWidth] = useState<number>(2);
+  const handTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const shapes = shapeState.present;
   const shapesRef = useRef(shapes);
   shapesRef.current = shapes;
-
 
   const selectedShape = useMemo(() => shapes.find((shape) => shape.id === selectedId) ?? null, [shapes, selectedId]);
 
@@ -106,11 +120,13 @@ const ProjectPage = () => {
     };
   }, [id, loaded, user]);
 
-  // Controlled Vision Agent connection
+  // Controlled Vision Agent connection with strict cursor timeout & cleanup
   useEffect(() => {
     if (!isCameraTracking) {
       visionAgent.disconnect();
       setVisionConnected(false);
+      setHandCursor(null);
+      if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
       return;
     }
 
@@ -120,13 +136,19 @@ const ProjectPage = () => {
       },
       (status) => {
         setVisionConnected(status.connected);
+        if (!status.connected) {
+          setHandCursor(null);
+        }
       }
     );
 
     return () => {
       visionAgent.disconnect();
+      setHandCursor(null);
+      if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
     };
   }, [isCameraTracking]);
+
 
   // Auto-save debounce effect
   useEffect(() => {
@@ -185,73 +207,73 @@ const ProjectPage = () => {
     if (projectPermission === "view") return;
 
     if (event.type === "cursorMoved") {
+      if (!isCameraTracking) return;
+      if (event.strokeWidth) setActiveStrokeWidth(event.strokeWidth);
+
       setHandCursor({
         x: event.x,
         y: event.y,
         hand: event.hand || "Right",
         action: event.action || "idle",
+        strokeWidth: event.strokeWidth,
+        radius: event.radius,
       });
+
+      if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
+      handTimeoutRef.current = setTimeout(() => {
+        setHandCursor(null);
+      }, 700);
     } else if (event.type === "handStatus") {
       if (!event.handDetected) {
         setHandCursor(null);
+        if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
       }
     } else if (event.type === "eraseAt") {
-      // Find any shapes that intersect with the eraser circle (radius ~ 24px)
       const eraserX = event.x;
       const eraserY = event.y;
-      const eraserRadius = event.radius || 24;
+      const radius = event.radius || eraserRadius || 24;
+      const mode = event.mode || eraserMode;
 
-      const shapesToDelete = shapes.filter((shape) => {
-        if (shape.type === "rectangle") {
-          return (
-            eraserX >= shape.geometry.x - eraserRadius &&
-            eraserX <= shape.geometry.x + shape.geometry.width + eraserRadius &&
-            eraserY >= shape.geometry.y - eraserRadius &&
-            eraserY <= shape.geometry.y + shape.geometry.height + eraserRadius
-          );
-        } else if (shape.type === "circle") {
-          const dist = Math.hypot(eraserX - shape.geometry.cx, eraserY - shape.geometry.cy);
-          return dist <= shape.geometry.r + eraserRadius;
-        } else if (shape.type === "line") {
-          // Bounding box approximation with padding
-          const minX = Math.min(shape.geometry.x1, shape.geometry.x2) - eraserRadius;
-          const maxX = Math.max(shape.geometry.x1, shape.geometry.x2) + eraserRadius;
-          const minY = Math.min(shape.geometry.y1, shape.geometry.y2) - eraserRadius;
-          const maxY = Math.max(shape.geometry.y1, shape.geometry.y2) + eraserRadius;
-          return eraserX >= minX && eraserX <= maxX && eraserY >= minY && eraserY <= maxY;
-        } else if (shape.type === "freehand") {
-          return shape.geometry.points.some(([px, py]) => Math.hypot(eraserX - px, eraserY - py) <= eraserRadius);
-        } else if (shape.type === "triangle") {
-          return shape.geometry.points.some(([px, py]) => Math.hypot(eraserX - px, eraserY - py) <= eraserRadius);
+      if (mode === "object") {
+        const shapesToDelete = shapes.filter((shape) =>
+          intersectsShape({ x: eraserX, y: eraserY }, radius, shape)
+        );
+
+        shapesToDelete.forEach((s) => {
+          dispatch({ type: "delete", id: s.id });
+          collaborationService.sendShapeDelete(s.id);
+          if (selectedId === s.id) setSelectedId(null);
+        });
+      } else {
+        const { updatedShapes, affected } = applyDetailEraser(
+          { x: eraserX, y: eraserY },
+          radius,
+          shapes
+        );
+        if (affected) {
+          dispatch({ type: "batch", shapes: updatedShapes });
+          updatedShapes.forEach((s) => collaborationService.sendShapeUpdate(s));
         }
-        return false;
-      });
-
-      shapesToDelete.forEach((s) => {
-        dispatch({ type: "delete", id: s.id });
-        collaborationService.sendShapeDelete(s.id);
-        if (selectedId === s.id) setSelectedId(null);
-      });
+      }
     } else if (event.type === "strokeFinished") {
       const strokePoints = event.points;
       if (strokePoints.length < 2) return;
 
+      const strokeWidth = event.strokeWidth || activeStrokeWidth || 2;
       const freehandShape: Shape = {
         id: crypto.randomUUID(),
         type: "freehand",
         geometry: { points: strokePoints.map((p) => [p.x, p.y]) },
         rotation: 0,
-        style: { stroke: "#ffffff", fill: "none", strokeWidth: 2 },
+        style: { stroke: "#ffffff", fill: "none", strokeWidth },
         revision: 1,
       };
 
       if (tool === "pen") {
-        // Pure freehand pen: commit stroke immediately
         dispatch({ type: "create", shape: freehandShape });
         collaborationService.sendShapeCreate(freehandShape);
         setSelectedId(freehandShape.id);
       } else {
-        // Gesture recognition mode: commit original stroke and offer geometric replacement
         dispatch({ type: "create", shape: freehandShape });
         collaborationService.sendShapeCreate(freehandShape);
         setSelectedId(freehandShape.id);
@@ -268,7 +290,6 @@ const ProjectPage = () => {
       }
     }
   };
-
 
   const handleAcceptRecognition = () => {
     if (!pendingRecognition) return;
@@ -299,13 +320,16 @@ const ProjectPage = () => {
       collaborationService.sendShapeCreate(action.shape);
     } else if (action.type === "delete") {
       collaborationService.sendShapeDelete(action.id);
+    } else if (action.type === "batch") {
+      action.shapes.forEach((s) => collaborationService.sendShapeUpdate(s));
     } else if (
       action.type === "move" ||
       action.type === "rotate" ||
       action.type === "scale" ||
-      action.type === "updateStyle"
+      action.type === "updateStyle" ||
+      action.type === "update"
     ) {
-      const updated = shapes.find((s) => s.id === action.id);
+      const updated = shapes.find((s) => s.id === (action.type === "update" ? action.shape.id : action.id));
       if (updated) {
         collaborationService.sendShapeUpdate(updated);
       }
@@ -386,17 +410,32 @@ const ProjectPage = () => {
           shapes={shapes}
           tool={tool}
           selectedId={selectedId}
-          onSelect={setSelectedId}
+          onSelect={(newId) => {
+            setSelectedId(newId);
+            if (newId) setShowProperties(true);
+          }}
           onChange={handleCanvasChange}
           onInputEvent={handleInputEvent}
           remoteCursors={remoteCursors}
           onCursorBroadcast={handleCursorBroadcast}
           handCursor={handCursor}
+          eraserMode={eraserMode}
+          eraserRadius={eraserRadius}
+          onEmptyClick={() => setShowProperties(false)}
         />
       </main>
 
       {/* Floating Toolbar for tools */}
-      {projectPermission !== "view" && <FloatingToolbar currentTool={tool} onToolSelect={setTool} />}
+      {projectPermission !== "view" && (
+        <FloatingToolbar
+          currentTool={tool}
+          onToolSelect={setTool}
+          eraserMode={eraserMode}
+          onEraserModeChange={setEraserMode}
+          eraserRadius={eraserRadius}
+          onEraserRadiusChange={setEraserRadius}
+        />
+      )}
 
       {/* Properties Panel for selected shape */}
       <ProjectPropertiesPanel
@@ -429,11 +468,12 @@ const ProjectPage = () => {
           size="icon"
           aria-label="Open properties"
           onClick={() => setShowProperties(true)}
-          className="fixed left-6 top-1/2 -translate-y-1/2 z-50 rounded-2xl w-12 h-12 glass border-border/40 shadow-lg"
+          className="fixed left-6 top-1/2 -translate-y-1/2 z-50 rounded-2xl w-12 h-12 glass border-border/40 shadow-lg hover:scale-105 transition-transform"
         >
           <Settings className="w-5 h-5" />
         </Button>
       )}
+
 
       {/* Local Camera Tracking Controls & Floating Panel */}
       <CameraTrackingPanel
@@ -441,7 +481,9 @@ const ProjectPage = () => {
         onStartTracking={() => setIsCameraTracking(true)}
         onStopTracking={() => setIsCameraTracking(false)}
         visionConnected={visionConnected}
+        handState={handCursor ? { handDetected: true, ...handCursor } : null}
       />
+
 
       {/* Recognition Accept/Reject Banner */}
       <ShapeAcceptancePrompt

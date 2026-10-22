@@ -52,6 +52,8 @@ const LeftSettingsPanel: React.FC<LeftSettingsPanelProps> = ({
         initial={{ x: -300, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         exit={{ x: -300, opacity: 0 }}
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
         className="fixed left-4 top-24 bottom-20 w-80 z-40 glass rounded-3xl border-border/40 overflow-y-auto shadow-2xl flex flex-col"
       >
         <div className="flex items-center justify-between p-5 border-b border-border/20 sticky top-0 bg-background/80 backdrop-blur-md z-10">
@@ -132,8 +134,8 @@ const LeftSettingsPanel: React.FC<LeftSettingsPanelProps> = ({
                 </div>
               </section>
 
-              {/* Fill Color */}
-              {selectedShape.type !== "line" && (
+              {/* Fill Color: Only for closed geometric shapes (rectangle, circle, triangle) */}
+              {(selectedShape.type === "rectangle" || selectedShape.type === "circle" || selectedShape.type === "triangle") && (
                 <section className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground flex items-center gap-1.5">
@@ -155,9 +157,17 @@ const LeftSettingsPanel: React.FC<LeftSettingsPanelProps> = ({
                         {color === "none" && <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold text-muted-foreground">✕</span>}
                       </button>
                     ))}
+                    <input
+                      type="color"
+                      value={selectedShape.style.fill.startsWith("#") ? selectedShape.style.fill : "#8b5cf6"}
+                      onChange={(e) => onStyleChange({ fill: e.target.value })}
+                      className="w-7 h-7 rounded-lg cursor-pointer bg-transparent border-0 p-0"
+                      title="Custom Fill Color"
+                    />
                   </div>
                 </section>
               )}
+
 
               {/* Stroke Width */}
               <section className="space-y-2">
