@@ -23,7 +23,8 @@ const shapeCenter = (shape: Shape): Point => {
 const pointsAttribute = (points: Coordinate[]) => points.map(([x, y]) => `${x},${y}`).join(" ");
 
 const shapeMarkup = (shape: Shape): string => {
-  const style = `fill="${shape.style.fill}" stroke="${shape.style.stroke}" stroke-width="${shape.style.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"`;
+  const maskAttr = shape.mask && shape.mask.length > 0 ? ` mask="url(#mask-${shape.id})"` : "";
+  const style = `fill="${shape.style.fill}" stroke="${shape.style.stroke}" stroke-width="${shape.style.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"${maskAttr}`;
   switch (shape.type) {
     case "line":
       return `<line ${style} x1="${shape.geometry.x1}" y1="${shape.geometry.y1}" x2="${shape.geometry.x2}" y2="${shape.geometry.y2}" />`;
@@ -50,6 +51,17 @@ export const exportShapesSvg = (shapes: Shape[], options: ExportSvgOptions = {})
   const bg = options.backgroundColor || "#0a0a0c"; // Default to dark background
 
   const bgRect = bg !== "transparent" ? `<rect width="${width}" height="${height}" fill="${bg}" />` : "";
+  const maskDefs = shapes
+    .filter((s) => s.mask && s.mask.length > 0)
+    .map(
+      (s) =>
+        `<mask id="mask-${s.id}"><rect x="-5000" y="-5000" width="10000" height="10000" fill="white" />${s
+          .mask!.map((m) => `<circle cx="${m.cx}" cy="${m.cy}" r="${m.r}" fill="black" />`)
+          .join("")}</mask>`
+    )
+    .join("");
+  const defsSection = maskDefs ? `<defs>${maskDefs}</defs>` : "";
+
   const markup = shapes
     .map((shape) => {
       const center = shapeCenter(shape);
@@ -57,8 +69,9 @@ export const exportShapesSvg = (shapes: Shape[], options: ExportSvgOptions = {})
     })
     .join("");
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">${bgRect}${markup}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">${defsSection}${bgRect}${markup}</svg>`;
 };
+
 
 export const exportShapesToPngOrJpeg = async (
   shapes: Shape[],

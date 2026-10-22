@@ -11,6 +11,8 @@ export interface ShapeState {
 export type ShapeAction =
   | { type: "load"; shapes: Shape[] }
   | { type: "create"; shape: Shape }
+  | { type: "update"; shape: Shape }
+  | { type: "batch"; shapes: Shape[] }
   | { type: "move"; id: string; dx: number; dy: number }
   | { type: "rotate"; id: string; rotation: number }
   | { type: "scale"; id: string; scaleX: number; scaleY: number; origin: Point }

@@ -55,6 +55,19 @@ export const shapeReducer = (state: ShapeState, action: ShapeAction): ShapeState
   switch (action.type) {
     case "load": return initialShapeState(action.shapes);
     case "create": return commit(state, [...state.present, { ...action.shape, revision: 1 }]);
+    case "update": {
+      const exists = state.present.some((s) => s.id === action.shape.id);
+      if (!exists) return state;
+      return commit(
+        state,
+        state.present.map((s) =>
+          s.id === action.shape.id ? { ...action.shape, revision: (s.revision || 1) + 1 } : s
+        )
+      );
+    }
+    case "batch": {
+      return commit(state, action.shapes);
+    }
     case "move": {
       if ((!action.dx && !action.dy) || !state.present.some(shape => shape.id === action.id)) return state;
       return commit(state, state.present.map(shape => shape.id === action.id ? { ...moveShape(shape, action.dx, action.dy), revision: shape.revision + 1 } : shape));

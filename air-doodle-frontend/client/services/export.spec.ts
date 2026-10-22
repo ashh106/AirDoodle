@@ -68,4 +68,27 @@ describe("Export Service", () => {
     expect(parsed.shapes[1].type).toBe("circle");
     expect(parsed.canvas.width).toBe(1000);
   });
+
+  it("exports persistent vector masks for partially detail-erased shapes", () => {
+    const maskedShapes: Shape[] = [
+      {
+        id: "rect-masked",
+        type: "rectangle",
+        geometry: { x: 50, y: 50, width: 100, height: 100 },
+        rotation: 0,
+        style: { stroke: "#ffffff", fill: "#3b82f6", strokeWidth: 2 },
+        revision: 1,
+        mask: [{ cx: 80, cy: 80, r: 15 }],
+      },
+    ];
+
+    const svg = exportShapesSvg(maskedShapes);
+    expect(svg).toContain('<defs><mask id="mask-rect-masked">');
+    expect(svg).toContain('<circle cx="80" cy="80" r="15" fill="black" />');
+    expect(svg).toContain('mask="url(#mask-rect-masked)"');
+
+    const jsonStr = exportShapesToJson("Masked", maskedShapes);
+    const parsed = JSON.parse(jsonStr);
+    expect(parsed.shapes[0].mask).toEqual([{ cx: 80, cy: 80, r: 15 }]);
+  });
 });

@@ -13,6 +13,12 @@ export interface ShapeStyle {
   strokeWidth: number;
 }
 
+export interface MaskCutout {
+  cx: number;
+  cy: number;
+  r: number;
+}
+
 export interface ShapeBase<T extends ShapeType, G> {
   id: string;
   type: T;
@@ -20,6 +26,7 @@ export interface ShapeBase<T extends ShapeType, G> {
   rotation: number;
   style: ShapeStyle;
   revision: number;
+  mask?: MaskCutout[];
 }
 
 export type LineShape = ShapeBase<"line", { x1: number; y1: number; x2: number; y2: number }>;
@@ -30,3 +37,4 @@ export type FreehandShape = ShapeBase<"freehand", { points: Coordinate[] }>;
 export type Shape = LineShape | RectangleShape | CircleShape | TriangleShape | FreehandShape;
 
 export type Tool = "select" | "pen" | "eraser" | "draw" | "line" | "rectangle" | "circle" | "triangle";
+export type EraserMode = "object" | "detail";
