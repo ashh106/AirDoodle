@@ -1,20 +1,30 @@
 import { Point, Shape } from "@/types/shape";
 
-const defaultStyle = { stroke: "#ffffff", fill: "none", strokeWidth: 2 };
+const defaultStyle = (strokeWidth = 4) => ({ stroke: "#ffffff", fill: "none", strokeWidth });
 
-export const recognizeStroke = async (points: Point[]): Promise<Shape> => {
+export type RecognitionEngine = "native-cpp" | "fallback";
+
+export const recognizeStroke = async (points: Point[], strokeWidth = 4): Promise<Shape & { engine?: RecognitionEngine }> => {
+  const style = defaultStyle(strokeWidth);
   // First attempt backend C++ engine recognition if running in browser
   if (typeof window !== "undefined") {
     try {
       const res = await fetch("/api/recognize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ points }),
+        body: JSON.stringify({ points, strokeWidth }),
       });
 
       if (res.ok) {
-        const shape: Shape = await res.json();
-        return shape;
+        const shape: Shape & { engine?: RecognitionEngine } = await res.json();
+        return {
+          ...shape,
+          style: {
+            stroke: shape.style?.stroke || "#ffffff",
+            fill: "none",
+            strokeWidth: shape.style?.strokeWidth || strokeWidth,
+          },
+        };
       }
     } catch {
       // Heuristic fallback
@@ -38,7 +48,7 @@ export const recognizeStroke = async (points: Point[]): Promise<Shape> => {
     type: "freehand",
     geometry: { points: points.map(p => [p.x, p.y]) },
     rotation: 0,
-    style: defaultStyle,
+    style,
     revision: 1,
   };
 
@@ -61,7 +71,7 @@ export const recognizeStroke = async (points: Point[]): Promise<Shape> => {
       type: "line",
       geometry: { x1: start.x, y1: start.y, x2: end.x, y2: end.y },
       rotation: 0,
-      style: defaultStyle,
+      style,
       revision: 1,
     };
   }
@@ -112,7 +122,7 @@ export const recognizeStroke = async (points: Point[]): Promise<Shape> => {
       type: "circle",
       geometry: { cx, cy, r: expectedRadius },
       rotation: 0,
-      style: defaultStyle,
+      style,
       revision: 1,
     };
   }
@@ -134,7 +144,7 @@ export const recognizeStroke = async (points: Point[]): Promise<Shape> => {
         type: "triangle",
         geometry: { points: [[top.x, top.y], [right.x, right.y], [left.x, left.y]] },
         rotation: 0,
-        style: defaultStyle,
+        style,
         revision: 1,
       };
     }
@@ -157,7 +167,7 @@ export const recognizeStroke = async (points: Point[]): Promise<Shape> => {
         type: "rectangle",
         geometry: { x: minX, y: minY, width, height },
         rotation: 0,
-        style: defaultStyle,
+        style,
         revision: 1,
       };
     }

@@ -469,3 +469,110 @@ This document provides a complete, detailed record of all discovery, audit, clea
   2. Launch `python vision/agent_server.py` in one terminal and `npm run dev` in `air-doodle-frontend`.
   3. Toggle "Start Camera" in the bottom-right panel and confirm live video appears in the thumbnail.
   4. Perform a right-hand index pinch to verify real-time continuous drawing following the fingertip.
+
+---
+
+## 16. Hand-Tracking System Completion & Camera Privacy Architecture (Phase VI — October 23, 2026)
+
+### 1. Camera Privacy & Explicit User Permission Architecture
+- **Root Cause & Architectural Shift**: Previously, starting `agent_server.py` immediately opened the webcam hardware, even with zero clients connected. Furthermore, visiting or refreshing the page could silently restart capture.
+- **Implementation**:
+  - Designated Python/OpenCV as the authoritative hardware capture owner, but kept the device **strictly OFF by default** on server launch (`cap = None`, `camera_state = "off"`).
+  - Web application starts in `Camera Off` / `Permission Required` state. Camera capture begins **only** when the user explicitly clicks **"Allow Camera / Start Tracking"** in `CameraTrackingPanel.tsx`.
+  - Implemented explicit loopback WebSocket protocol commands:
+    - Client sends `{"action": "startCapture"}`: Server transitions state to `starting`, initializes OpenCV with DirectShow/default fallback, sets 640×480 resolution, and broadcasts `cameraStatus: active`.
+    - Client sends `{"action": "stopCapture"}`: Server transitions state to `stopping`, immediately calls `cap.release()`, sets `cap = None`, stops frame acquisition, terminates active strokes cleanly, and broadcasts `cameraStatus: off`.
+  - Automatic hardware release on:
+    - Project page unmount (`useEffect` cleanup in `Project.tsx`).
+    - User logout (`authService.logout()` in `auth.service.ts`).
+    - Browser session closure (server detects client disconnection; when all authorized sessions disconnect, capture releases immediately).
+    - WebSocket transport reconnection never silently restarts capture.
+  - Implemented separate, distinct controls in `CameraTrackingPanel.tsx`:
+    - "Hide Video Preview" / "Show Video Preview" toggles only the video box visibility without stopping tracking.
+    - "Stop Camera" completely halts capture, releases hardware, and clears cursors.
+
+### 2. Strict Left-Hand and Right-Hand Identification & Spatial Continuity
+- **Root Cause & Mirroring Correction**:
+  - Horizontal camera mirroring (`cv2.flip(frame, 1)`) causes MediaPipe's anatomical model to invert handedness labels (a physical Right hand appears anatomically as a Left hand).
+  - Inverted the classification (`physical_hand = "Right" if raw_label == "Left" else "Left"`).
+  - Extracted classification confidence score (`classification[0].score`) in `HandTracker.process()`.
+  - Added spatial sorting by wrist X-coordinate: in mirrored selfie view, the user's physical Right hand is consistently positioned on the right side of the frame (higher X), and Left on the left (lower X).
+- **Strict Role Separation**:
+  - **Right Hand**: Exclusively controls index fingertip pointer, brush sizing, and drawing. Cannot initiate erasing.
+  - **Left Hand**: Exclusively controls eraser pointer, eraser radius, and erasing. Cannot initiate drawing.
+
+### 3. Continuous 1.0-Second Activation Hold & Intentional Release
+- **Implementation**:
+  - Implemented a debounced state machine requiring a continuous **1,000 milliseconds (1.0s)** pinch hold before `penDown` triggers.
+  - Releasing or opening the pinch before the full second resets the activation timer immediately without drawing.
+  - While holding, server broadcasts `action: "waiting"` with `holdProgress: 0.0 - 1.0` and `holdDuration: 1.0`.
+  - When drawing begins, stroke width is **frozen** to prevent unintended thickness changes during the stroke.
+  - When the user releases the pinch, the stroke finalizes cleanly (`penUp`, `strokeFinished`) precisely at the last valid fingertip coordinate. The next stroke requires another uninterrupted 1.0s hold.
+  - Applied the identical 1.0s hold activation pattern to Left-hand erasing.
+
+### 4. High-Contrast Master Hand Pointer & Zero Gesture Zoom
+- **Canvas Pointer Rendering**:
+  - Rendered a distinctive, high-contrast master hand pointer centered on the index fingertip on `<Canvas>`.
+  - Features high-contrast double outline, pinpoint target dot, and state badge (`Move Pointer`, `Hold to Draw — 1.0s`, `Drawing`, `Erasing`).
+  - When `action === "waiting"`, renders a circular SVG countdown progress ring (0% to 100%) around the pointer tip.
+  - Strictly independent of mouse movement.
+- **Removed Gesture Zoom**:
+  - Finger spreading strictly controls brush width (Right hand: 2–24px) or eraser radius (Left hand: 10–60px). It never triggers camera or canvas zoom.
+
+### 5. Native C++ Geometric Recognition Integration
+- Verified the complete stroke pipeline:
+  `Project.tsx` -> `recognizeStroke(strokePoints)` -> `POST /api/recognize` -> `geometryEngine.recognize(points)` -> `cpp-engine/build/airdoodle-geometry.exe`.
+- Successfully distinguishes Lines, Rectangles/Squares, Circles, Triangles, and Unknown/Freehand strokes.
+- Freehand and ambiguous strokes are safely preserved without destructive fallback.
+- Recognized shapes inherit stroke width and color with explicit `fill: "none"` (no black fill artifacts).
+
+### 6. Component & Service Modifications Breakdown
+- **[`vision/agent_server.py`](file:///d:/VsCode/Projects/AirDoodle/vision/agent_server.py)**:
+  - Hardware camera capture is completely inactive (`cap = None`, `camera_state = "off"`) on server startup.
+  - Implemented loopback action dispatcher: handles `startCapture` and `stopCapture` WebSocket messages.
+  - Mirrored handedness correction: flips raw MediaPipe labels (`"Right" if raw == "Left" else "Left"`).
+  - Spatial wrist sorting across multiple hands to maintain continuous identity tracking.
+  - State machine requiring an uninterrupted 1.0-second pinch hold before dispatching `penDown`, broadcasting continuous `holdProgress` updates (`0.0 - 1.0`).
+  - Strict role isolation: Right hand only produces `action: "drawing"`; Left hand only produces `action: "erasing"`.
+  - Stroke width freeze on draw activation.
+  - Auto-releases hardware handle when all authorized WebSocket client connections terminate.
+- **[`vision/tracking/hand_tracker.py`](file:///d:/VsCode/Projects/AirDoodle/vision/tracking/hand_tracker.py)**:
+  - Added classification confidence score extraction (`classification.score`) from MediaPipe results.
+- **[`client/services/vision.service.ts`](file:///d:/VsCode/Projects/AirDoodle/air-doodle-frontend/client/services/vision.service.ts)**:
+  - Added `CameraState` type (`"off" | "starting" | "active" | "stopping" | "error"`).
+  - Implemented explicit `startCapture()`, `stopCapture()`, and reactive `onCameraStatus()` subscribers.
+  - Added loopback control ensuring reconnects never silently re-engage camera capture without user intent.
+- **[`client/components/panels/CameraTrackingPanel.tsx`](file:///d:/VsCode/Projects/AirDoodle/air-doodle-frontend/client/components/panels/CameraTrackingPanel.tsx)**:
+  - Decoupled video preview toggling from camera hardware lifecycle.
+  - Added 1.0s countdown progress bar for `action: "waiting"`.
+  - Added primary "Allow Camera / Start Tracking" and "Stop Camera" controls with explicit status badges.
+- **[`client/components/canvas/Canvas.tsx`](file:///d:/VsCode/Projects/AirDoodle/air-doodle-frontend/client/components/canvas/Canvas.tsx)**:
+  - Added high-contrast master hand cursor centered on the index fingertip.
+  - Added circular SVG countdown progress ring during the 1.0s activation hold.
+  - Renders live active polyline during continuous drawing.
+- **[`client/pages/Project.tsx`](file:///d:/VsCode/Projects/AirDoodle/air-doodle-frontend/client/pages/Project.tsx)**:
+  - Fixed stale closure in WebSocket event subscriber by referencing latest handlers via mutable ref (`handleInputEventRef`).
+  - Added automatic camera shutdown on unmount and navigation cleanup.
+- **[`client/services/auth.service.ts`](file:///d:/VsCode/Projects/AirDoodle/air-doodle-frontend/client/services/auth.service.ts)**:
+  - Ensures camera hardware is immediately stopped when user logs out.
+- **[`tests/test_vision_agent.py`](file:///d:/VsCode/Projects/AirDoodle/tests/test_vision_agent.py)** & **[`client/services/vision.service.spec.ts`](file:///d:/VsCode/Projects/AirDoodle/air-doodle-frontend/client/services/vision.service.spec.ts)**:
+  - Unit tests covering explicit camera activation, stop commands, privacy guarantees, and message schema validations.
+
+### 7. Physical Hardware Acceptance Protocol
+1. **Camera Off Default**: Launch `python vision/agent_server.py` and open the site; verify camera status is `Camera Off` and no webcam light turns on.
+2. **Explicit Start**: Click **Allow Camera / Start Tracking** in the floating panel; verify camera status transitions `Starting -> Active` and preview appears.
+3. **Right Hand Tracking**: Raise right hand; verify master pointer follows index fingertip on the canvas with label `Right Hand • Move Pointer`.
+4. **Pinch Under 1s**: Pinch thumb and index for 0.5s and release; verify activation countdown ring resets with NO stroke drawn.
+5. **Continuous 1.0s Hold to Draw**: Pinch and hold for 1.0s; verify countdown reaches 100%, transitions to `Drawing (W: Xpx)`, draws active live polyline, and releases cleanly at the last point when opened.
+6. **Left Hand Erasing**: Raise left hand, hold pinch 1.0s; verify red dashed eraser circle appears and erases vector paths.
+7. **Explicit Stop**: Click **Stop Camera** icon; verify capture immediately halts, webcam hardware releases, and cursor disappears.
+
+### 8. Comprehensive Verification Matrix
+| Test Suite | Command | Result | Details |
+| :--- | :--- | :--- | :--- |
+| **Python Unit Tests** | `python -m unittest discover -s tests -v` | **PASS (5/5)** | Handshake, normalized events, gesture recognition, and explicit camera privacy/permission control |
+| **Frontend Typecheck** | `npm run typecheck` | **PASS (Exit 0)** | 0 TypeScript errors across client, server, and shared contracts |
+| **Frontend Unit Tests** | `npm test` | **PASS (37/37)** | 7 test suites passing: `vision.service`, `recognizer`, `shapeReducer`, `eraserGeometry`, `export`, `utils`, `geometry-engine` |
+| **Frontend Production Build** | `npm run build` | **PASS (Exit 0)** | Vite SPA (`dist/spa`) and SSR server bundle (`dist/server/node-build.mjs`) generated cleanly |
+| **C++ Geometry Engine** | `.\cpp-engine\build\test_geometry.exe` | **PASS (Exit 0)** | Native binary passed distance, intersection, transforms, and 4-shape recognition |
+| **Git Diff Check** | `git diff --check` | **PASS (Exit 0)** | Clean diff with zero whitespace warnings |

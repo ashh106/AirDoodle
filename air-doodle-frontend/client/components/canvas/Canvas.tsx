@@ -1,7 +1,8 @@
-import React, { PointerEvent, useRef, useState } from "react";
+import React, { PointerEvent, WheelEvent, useEffect, useRef, useState } from "react";
 import { InputEvent, HandAction } from "@/types/input";
 import { EraserMode, Point, Shape, ShapeAction, ShapeType, Tool } from "@/types/shape";
 import { intersectsShape, applyDetailEraser } from "@/lib/eraserGeometry";
+import { Viewport, defaultViewport, panBy, viewBoxString, zoomToward } from "@/lib/viewport";
 
 interface CanvasProps {
   shapes: Shape[];
@@ -19,11 +20,17 @@ interface CanvasProps {
     action: HandAction;
     strokeWidth?: number;
     radius?: number;
+    holdProgress?: number;
+    mode?: "draw" | "erase" | "music" | "detail" | "object";
   } | null;
   eraserMode?: EraserMode;
   eraserRadius?: number;
   onEmptyClick?: () => void;
   liveHandStroke?: Point[] | null;
+  brushWidth?: number;
+  viewport?: Viewport;
+  onViewportChange?: (vp: Viewport) => void;
+  emptyHint?: string;
 }
 
 type Bounds = { x: number; y: number; width: number; height: number };
@@ -90,12 +97,12 @@ const worldBounds = (shape: Shape): Bounds => {
   return { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
 };
 
-const makeShape = (type: ShapeType, start: Point, end: Point): Shape => {
+const makeShape = (type: ShapeType, start: Point, end: Point, strokeWidth = 4): Shape => {
   const left = Math.min(start.x, end.x);
   const top = Math.min(start.y, end.y);
   const width = Math.abs(end.x - start.x);
   const height = Math.abs(end.y - start.y);
-  const base = { id: crypto.randomUUID(), rotation: 0, style: { stroke: "#ffffff", fill: "none", strokeWidth: 2 }, revision: 1 };
+  const base = { id: crypto.randomUUID(), rotation: 0, style: { stroke: "#ffffff", fill: "none", strokeWidth }, revision: 1 };
   switch (type) {
     case "line": return { ...base, type, geometry: { x1: start.x, y1: start.y, x2: end.x, y2: end.y } };
     case "rectangle": return { ...base, type, geometry: { x: left, y: top, width, height } };
@@ -138,12 +145,34 @@ const Canvas: React.FC<CanvasProps> = ({
   eraserRadius = 24,
   onEmptyClick,
   liveHandStroke,
+  brushWidth = 4,
+  viewport = defaultViewport(),
+  onViewportChange,
+  emptyHint,
 }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [cursor, setCursor] = useState<Point>({ x: 0, y: 0 });
+  const [spaceDown, setSpaceDown] = useState(false);
+  const panDrag = useRef<{ x: number; y: number; originX: number; originY: number } | null>(null);
   const selected = shapes.find(shape => shape.id === selectedId) ?? null;
   const selectionBounds = selected ? boundsOf(selected) : null;
+  const strokeWidth = Math.max(1, brushWidth || 4);
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.code === "Space" && !e.repeat) setSpaceDown(true);
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === "Space") setSpaceDown(false);
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, []);
 
   const getPoint = (event: PointerEvent<SVGSVGElement>): Point => {
     const svg = svgRef.current;
@@ -161,7 +190,29 @@ const Canvas: React.FC<CanvasProps> = ({
     return point.x >= bounds.x - 8 && point.x <= bounds.x + bounds.width + 8 && point.y >= bounds.y - 8 && point.y <= bounds.y + bounds.height + 8;
   });
 
+  const handleWheel = (event: WheelEvent<SVGSVGElement>) => {
+    event.preventDefault();
+    const svg = svgRef.current;
+    if (!svg || !onViewportChange) return;
+    const rect = svg.getBoundingClientRect();
+    const fx = (event.clientX - rect.left) / Math.max(1, rect.width);
+    const fy = (event.clientY - rect.top) / Math.max(1, rect.height);
+    if (event.ctrlKey || event.metaKey) {
+      const factor = event.deltaY > 0 ? 0.9 : 1.1;
+      onViewportChange(zoomToward(viewport, viewport.scale * factor, fx, fy));
+    } else if (event.shiftKey) {
+      onViewportChange(panBy(viewport, event.deltaY / viewport.scale, 0));
+    } else {
+      onViewportChange(panBy(viewport, event.deltaX / viewport.scale, event.deltaY / viewport.scale));
+    }
+  };
+
   const handlePointerDown = (event: PointerEvent<SVGSVGElement>) => {
+    if (event.button === 1 || spaceDown || event.altKey) {
+      panDrag.current = { x: event.clientX, y: event.clientY, originX: viewport.originX, originY: viewport.originY };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
     if (event.button !== 0) return;
     const point = getPoint(event);
     onInputEvent({ type: "penDown", x: point.x, y: point.y });
@@ -221,6 +272,16 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const handlePointerMove = (event: PointerEvent<SVGSVGElement>) => {
+    if (panDrag.current && onViewportChange) {
+      const dx = (panDrag.current.x - event.clientX) / viewport.scale;
+      const dy = (panDrag.current.y - event.clientY) / viewport.scale;
+      onViewportChange({
+        ...viewport,
+        originX: panDrag.current.originX + dx,
+        originY: panDrag.current.originY + dy,
+      });
+      return;
+    }
     const point = getPoint(event);
     setCursor(point);
     onCursorBroadcast?.(point.x, point.y);
@@ -254,6 +315,10 @@ const Canvas: React.FC<CanvasProps> = ({
   };
 
   const handlePointerUp = (event: PointerEvent<SVGSVGElement>) => {
+    if (panDrag.current) {
+      panDrag.current = null;
+      return;
+    }
     const point = getPoint(event);
     if (!drag) {
       onInputEvent({ type: "penUp", x: point.x, y: point.y });
@@ -270,7 +335,7 @@ const Canvas: React.FC<CanvasProps> = ({
     if (drag.mode === "stroke") {
       strokePoints = [...drag.points, point];
     } else if (drag.mode === "create") {
-      const shape = makeShape(drag.shapeType, drag.start, point);
+      const shape = makeShape(drag.shapeType, drag.start, point, strokeWidth);
       const size = Math.max(Math.abs(point.x - drag.start.x), Math.abs(point.y - drag.start.y));
       if (size >= 2) {
         onChange({ type: "create", shape });
@@ -298,7 +363,7 @@ const Canvas: React.FC<CanvasProps> = ({
     const strokeX = strokePoints.map(point => point.x);
     const strokeY = strokePoints.map(point => point.y);
     const strokeSize = Math.max(Math.max(...strokeX) - Math.min(...strokeX), Math.max(...strokeY) - Math.min(...strokeY));
-    if (drag.mode === "stroke" && strokeSize >= 2) onInputEvent({ type: "strokeFinished", points: strokePoints });
+    if (drag.mode === "stroke" && strokeSize >= 2) onInputEvent({ type: "strokeFinished", points: strokePoints, strokeWidth });
     setDrag(null);
   };
 
@@ -324,13 +389,14 @@ const Canvas: React.FC<CanvasProps> = ({
     <div className="absolute inset-0 overflow-hidden bg-background">
       <svg
         ref={svgRef}
-        viewBox="0 0 1000 700"
+        viewBox={viewBoxString(viewport)}
         preserveAspectRatio="xMidYMid meet"
-        className={`h-full w-full touch-none ${tool === "select" ? "cursor-default" : tool === "eraser" ? "cursor-none" : "cursor-crosshair"}`}
+        className={`h-full w-full touch-none ${spaceDown ? "cursor-grab" : tool === "select" ? "cursor-default" : tool === "eraser" ? "cursor-none" : "cursor-crosshair"}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerCancel}
+        onPointerCancel={(e) => { panDrag.current = null; handlePointerCancel(e); }}
+        onWheel={handleWheel}
       >
         <defs>
           <pattern id="workspace-grid" width="40" height="40" patternUnits="userSpaceOnUse">
@@ -354,9 +420,9 @@ const Canvas: React.FC<CanvasProps> = ({
             </mask>
           ))}
         </defs>
-        <rect width="1000" height="700" fill="url(#workspace-grid)" />
-        <line x1="500" y1="0" x2="500" y2="700" stroke="rgba(139,92,246,0.25)" strokeWidth="1" />
-        <line x1="0" y1="350" x2="1000" y2="350" stroke="rgba(139,92,246,0.25)" strokeWidth="1" />
+        <rect x={viewport.originX - 20000} y={viewport.originY - 20000} width="40000" height="40000" fill="url(#workspace-grid)" />
+        <line x1="-20000" y1="0" x2="20000" y2="0" stroke="rgba(139,92,246,0.18)" strokeWidth={1 / viewport.scale} />
+        <line x1="0" y1="-20000" x2="0" y2="20000" stroke="rgba(139,92,246,0.18)" strokeWidth={1 / viewport.scale} />
         {shapes.map(shape => (
           <g key={shape.id} transform={`rotate(${shape.rotation} ${centerOf(shapePoints(shape)).x} ${centerOf(shapePoints(shape)).y})`}>
             <g transform={previewTransform(shape)}>
@@ -365,22 +431,22 @@ const Canvas: React.FC<CanvasProps> = ({
           </g>
         ))}
         {drag?.mode === "stroke" && (
-          <polyline points={drag.points.map(point => `${point.x},${point.y}`).join(" ")} fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" />
+          <polyline points={drag.points.map(point => `${point.x},${point.y}`).join(" ")} fill="none" stroke="#ffffff" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
         )}
         {liveHandStroke && liveHandStroke.length > 1 && (
           <polyline
             points={liveHandStroke.map(point => `${point.x},${point.y}`).join(" ")}
             fill="none"
             stroke="#ffffff"
-            strokeWidth={handCursor?.strokeWidth || 4}
+            strokeWidth={handCursor?.strokeWidth || strokeWidth}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
         )}
         {drag?.mode === "create" && (
-          <g opacity="0.6">{renderShape(makeShape(drag.shapeType, drag.start, drag.current))}</g>
+          <g opacity="0.6">{renderShape(makeShape(drag.shapeType, drag.start, drag.current, strokeWidth))}</g>
         )}
-        {drag?.mode === "create" && renderShape(makeShape(drag.shapeType, drag.start, drag.current))}
+        {drag?.mode === "create" && renderShape(makeShape(drag.shapeType, drag.start, drag.current, strokeWidth))}
         {selected && selectionBounds && (
           <g transform={`rotate(${selected.rotation} ${centerOf(shapePoints(selected)).x} ${centerOf(shapePoints(selected)).y})`}>
             <rect x={selectionBounds.x} y={selectionBounds.y} width={selectionBounds.width} height={selectionBounds.height} fill="none" stroke="#8b5cf6" strokeWidth="1.5" strokeDasharray="6 4" pointerEvents="none" />
@@ -415,42 +481,55 @@ const Canvas: React.FC<CanvasProps> = ({
         {/* Real-time Hand Tracking Cursor (Strictly independent of mouse) */}
         {handCursor && (
           <g transform={`translate(${handCursor.x} ${handCursor.y})`} pointerEvents="none">
-            {handCursor.action === "erasing" ? (
+            {handCursor.action === "erasing" || handCursor.action === "detail_erasing" || handCursor.action === "object_erasing" ? (
               <>
                 <circle
                   r={handCursor.radius || eraserRadius || 24}
-                  fill="rgba(239, 68, 68, 0.25)"
+                  fill="rgba(239, 68, 68, 0.20)"
                   stroke="#ef4444"
-                  strokeWidth="2"
+                  strokeWidth="2.5"
                   strokeDasharray="4 2"
                 />
-                <circle r="4" fill="#ef4444" />
-                <rect x="8" y="-18" width="130" height="20" rx="4" fill="rgba(239, 68, 68, 0.9)" />
-                <text x="13" y="-4" fill="#ffffff" fontSize="10" fontWeight="bold" fontFamily="sans-serif">
-                  Erasing (R: {handCursor.radius || eraserRadius || 24}px)
+                <circle r="4" fill="#ef4444" stroke="#ffffff" strokeWidth="1.5" />
+                <rect x="10" y="-22" width="140" height="22" rx="6" fill="rgba(239, 68, 68, 0.95)" stroke="rgba(255,255,255,0.4)" strokeWidth="1" />
+                <text x="16" y="-7" fill="#ffffff" fontSize="10.5" fontWeight="bold" fontFamily="sans-serif">
+                  {handCursor.action === "object_erasing" || (handCursor.mode === "object") ? "Object Erasing" : "Detail Erasing"} (R: {handCursor.radius || eraserRadius || 24}px)
                 </text>
               </>
             ) : handCursor.action === "drawing" ? (
               <>
                 <circle
-                  r={Math.max(4, (handCursor.strokeWidth || 4) / 2)}
-                  fill="rgba(139, 92, 246, 0.3)"
-                  stroke="#8b5cf6"
-                  strokeWidth="2.5"
+                  r={Math.max(5, (handCursor.strokeWidth || 4) / 2)}
+                  fill="rgba(139, 92, 246, 0.4)"
+                  stroke="#a78bfa"
+                  strokeWidth="3"
                 />
-                <circle r="3" fill="#8b5cf6" />
-                <rect x="8" y="-18" width="130" height="20" rx="4" fill="rgba(139, 92, 246, 0.9)" />
-                <text x="13" y="-4" fill="#ffffff" fontSize="10" fontWeight="bold" fontFamily="sans-serif">
-                  Drawing (W: {handCursor.strokeWidth || 4}px)
+                <circle r="3" fill="#ffffff" stroke="#8b5cf6" strokeWidth="1.5" />
+                <rect x="10" y="-22" width="135" height="22" rx="6" fill="rgba(124, 58, 237, 0.95)" stroke="rgba(255,255,255,0.4)" strokeWidth="1" />
+                <text x="16" y="-7" fill="#ffffff" fontSize="10.5" fontWeight="bold" fontFamily="sans-serif">
+                  Drawing (W: {handCursor.strokeWidth || strokeWidth}px)
                 </text>
               </>
             ) : handCursor.action === "waiting" ? (
               <>
-                <circle r="16" fill="rgba(245, 158, 11, 0.2)" stroke="#f59e0b" strokeWidth="2" strokeDasharray="3 3" />
-                <circle r="4" fill="#f59e0b" />
-                <rect x="8" y="-18" width="95" height="20" rx="4" fill="rgba(245, 158, 11, 0.9)" />
-                <text x="13" y="-4" fill="#ffffff" fontSize="10" fontWeight="bold" fontFamily="sans-serif">
-                  Hold to Activate
+                {/* 1.0s Continuous Activation Hold Countdown Ring */}
+                <circle r="18" fill="rgba(245, 158, 11, 0.15)" stroke="rgba(245, 158, 11, 0.3)" strokeWidth="3" />
+                <circle
+                  r="18"
+                  fill="none"
+                  stroke="#f59e0b"
+                  strokeWidth="3.5"
+                  strokeLinecap="round"
+                  strokeDasharray={`${Math.max(0.1, (handCursor.holdProgress || 0) * 113.1)} 113.1`}
+                  strokeDashoffset="0"
+                  transform="rotate(-90)"
+                />
+                <circle r="4" fill="#ffffff" stroke="#f59e0b" strokeWidth="2" />
+                <rect x="10" y="-22" width="145" height="22" rx="6" fill="rgba(217, 119, 6, 0.95)" stroke="rgba(255,255,255,0.4)" strokeWidth="1" />
+                <text x="16" y="-7" fill="#ffffff" fontSize="10" fontWeight="bold" fontFamily="sans-serif">
+                  {handCursor.mode === "detail" || handCursor.mode === "object" || handCursor.mode === "erase"
+                    ? `Hold to Erase — 1.0s (${Math.round((handCursor.holdProgress || 0) * 100)}%)`
+                    : `Hold to Draw — 1.0s (${Math.round((handCursor.holdProgress || 0) * 100)}%)`}
                 </text>
               </>
             ) : handCursor.action === "adjusting_size" ? (
@@ -459,22 +538,28 @@ const Canvas: React.FC<CanvasProps> = ({
                   r={handCursor.radius || eraserRadius || 24}
                   fill="rgba(59, 130, 246, 0.25)"
                   stroke="#3b82f6"
-                  strokeWidth="2"
+                  strokeWidth="2.5"
                   strokeDasharray="4 2"
                 />
-                <circle r="4" fill="#3b82f6" />
-                <rect x="8" y="-18" width="85" height="20" rx="4" fill="rgba(59, 130, 246, 0.9)" />
-                <text x="13" y="-4" fill="#ffffff" fontSize="10" fontWeight="bold" fontFamily="sans-serif">
+                <circle r="4" fill="#ffffff" stroke="#3b82f6" strokeWidth="1.5" />
+                <rect x="10" y="-22" width="95" height="22" rx="6" fill="rgba(37, 99, 235, 0.95)" stroke="rgba(255,255,255,0.4)" strokeWidth="1" />
+                <text x="16" y="-7" fill="#ffffff" fontSize="10.5" fontWeight="bold" fontFamily="sans-serif">
                   Adjusting Size
                 </text>
               </>
             ) : (
+              /* Master Hand Pointer (Distinct high contrast crosshair + pinpoint) */
               <>
-                <circle r="7" fill="none" stroke="#a78bfa" strokeWidth="2" />
-                <circle r="2.5" fill="#ffffff" />
-                <rect x="8" y="-16" width="75" height="18" rx="4" fill="rgba(30, 30, 40, 0.85)" stroke="rgba(255,255,255,0.2)" />
-                <text x="13" y="-4" fill="#a78bfa" fontSize="9" fontWeight="bold" fontFamily="sans-serif">
-                  {handCursor.hand === "Left" ? "Left Hand" : "Right Hand"}
+                <circle r="12" fill="none" stroke="#000000" strokeWidth="3" opacity="0.6" />
+                <circle r="12" fill="rgba(139, 92, 246, 0.2)" stroke="#8b5cf6" strokeWidth="2" />
+                <line x1="-16" y1="0" x2="-6" y2="0" stroke="#8b5cf6" strokeWidth="2" />
+                <line x1="6" y1="0" x2="16" y2="0" stroke="#8b5cf6" strokeWidth="2" />
+                <line x1="0" y1="-16" x2="0" y2="-6" stroke="#8b5cf6" strokeWidth="2" />
+                <line x1="0" y1="6" x2="0" y2="16" stroke="#8b5cf6" strokeWidth="2" />
+                <circle r="3.5" fill="#ffffff" stroke="#000000" strokeWidth="1" />
+                <rect x="10" y="-22" width="125" height="22" rx="6" fill="rgba(15, 15, 25, 0.92)" stroke="rgba(139, 92, 246, 0.6)" strokeWidth="1" />
+                <text x="16" y="-7" fill="#c4b5fd" fontSize="10" fontWeight="bold" fontFamily="sans-serif">
+                  {handCursor.action === "lost" ? "Hand Lost" : `${handCursor.hand} Hand • Tracking`}
                 </text>
               </>
             )}

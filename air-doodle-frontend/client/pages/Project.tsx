@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useReducer, useState, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useReducer, useState, useRef } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Redo, Settings, Undo } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ import { collaborationService, RemoteCursor } from "@/services/collaboration.ser
 import { visionAgent } from "@/services/vision.service";
 import { useAuth } from "@/context/useAuth";
 import { initialShapeState, shapeReducer } from "@/state/shapeReducer";
-import { InputEvent } from "@/types/input";
+import { InputEvent, CameraLifecycleState, HandAction } from "@/types/input";
 import { Point, Shape, ShapeAction, ShapeStyle, Tool } from "@/types/shape";
 import { intersectsShape, applyDetailEraser } from "@/lib/eraserGeometry";
 import { toast } from "sonner";
@@ -48,14 +48,17 @@ const ProjectPage = () => {
 
   // Local vision camera state
   const [isCameraTracking, setIsCameraTracking] = useState(false);
+  const [cameraState, setCameraState] = useState<CameraLifecycleState>("off");
   const [visionConnected, setVisionConnected] = useState(false);
   const [handCursor, setHandCursor] = useState<{
     x: number;
     y: number;
     hand: "Right" | "Left";
-    action: "idle" | "waiting" | "drawing" | "erasing" | "adjusting_size";
+    action: HandAction;
     strokeWidth?: number;
     radius?: number;
+    holdProgress?: number;
+    mode?: "draw" | "erase" | "music" | "detail" | "object";
   } | null>(null);
 
   // Eraser modes & brush sizes
@@ -123,10 +126,15 @@ const ProjectPage = () => {
     };
   }, [id, loaded, user]);
 
-  // Controlled Vision Agent connection with strict cursor timeout & cleanup
+  // Keep a ref to the latest handleInputEvent so the vision callback never goes stale
+  const handleInputEventRef = useRef<((event: InputEvent) => void) | null>(null);
+
+  // Controlled Vision Agent connection with explicit user permission & cleanup
   useEffect(() => {
     if (!isCameraTracking) {
+      visionAgent.stopCapture();
       visionAgent.disconnect();
+      setCameraState("off");
       setVisionConnected(false);
       setHandCursor(null);
       setCameraPreview(null);
@@ -136,12 +144,15 @@ const ProjectPage = () => {
       return;
     }
 
+    setCameraState("starting");
+    // Use a stable wrapper that always calls the latest handleInputEvent via ref
     visionAgent.connect(
       (event) => {
-        handleInputEvent(event);
+        handleInputEventRef.current?.(event);
       },
       (status) => {
         setVisionConnected(status.connected);
+        setCameraState(status.cameraState);
         if (!status.connected) {
           setHandCursor(null);
           setCameraPreview(null);
@@ -149,15 +160,19 @@ const ProjectPage = () => {
         }
       }
     );
+    visionAgent.startCapture();
 
     return () => {
+      visionAgent.stopCapture();
       visionAgent.disconnect();
+      setCameraState("off");
       setHandCursor(null);
       setCameraPreview(null);
       setCameraError(null);
       setLiveHandStroke(null);
       if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isCameraTracking]);
 
 
@@ -217,7 +232,14 @@ const ProjectPage = () => {
   const handleInputEvent = (event: InputEvent) => {
     if (projectPermission === "view") return;
 
-    if (event.type === "cameraPreview") {
+    if (event.type === "cameraStatus") {
+      setCameraState(event.state);
+      if (event.state === "off" || event.state === "error") {
+        setHandCursor(null);
+        setCameraPreview(null);
+        setLiveHandStroke(null);
+      }
+    } else if (event.type === "cameraPreview") {
       setCameraPreview(event.image);
       setCameraError(null);
     } else if (event.type === "cameraError") {
@@ -246,6 +268,8 @@ const ProjectPage = () => {
         action: event.action || "idle",
         strokeWidth: event.strokeWidth,
         radius: event.radius,
+        holdProgress: event.holdProgress,
+        mode: event.mode,
       });
 
       if (handTimeoutRef.current) clearTimeout(handTimeoutRef.current);
@@ -318,6 +342,7 @@ const ProjectPage = () => {
       }
     }
   };
+  handleInputEventRef.current = handleInputEvent;
 
   const handleAcceptRecognition = () => {
     if (!pendingRecognition) return;
@@ -526,8 +551,12 @@ const ProjectPage = () => {
       {/* Local Camera Tracking Controls & Floating Panel */}
       <CameraTrackingPanel
         isTracking={isCameraTracking}
+        cameraState={cameraState}
         onStartTracking={() => setIsCameraTracking(true)}
-        onStopTracking={() => setIsCameraTracking(false)}
+        onStopTracking={() => {
+          setIsCameraTracking(false);
+          visionAgent.stopCapture();
+        }}
         visionConnected={visionConnected}
         handState={handCursor ? { handDetected: true, ...handCursor } : null}
         cameraPreview={cameraPreview}

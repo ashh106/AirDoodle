@@ -1,4 +1,5 @@
 import { User } from "@/types/user";
+import { visionAgent } from "./vision.service";
 
 export interface AuthResponse {
   user: User;
@@ -102,6 +103,10 @@ export const authService = {
   },
 
   logout: () => {
+    try {
+      visionAgent.stopCapture();
+      visionAgent.disconnect();
+    } catch {}
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     localStorage.removeItem("user");

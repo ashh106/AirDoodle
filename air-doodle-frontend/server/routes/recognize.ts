@@ -4,7 +4,7 @@ import { geometryEngine } from "../services/geometry-engine";
 
 export async function handleRecognize(req: Request, res: Response) {
   try {
-    const { points } = req.body;
+    const { points, strokeWidth } = req.body;
     if (!Array.isArray(points) || points.length < 2) {
       return res.status(400).json({ error: "At least two points are required" });
     }
@@ -15,7 +15,8 @@ export async function handleRecognize(req: Request, res: Response) {
     }));
 
     // Delegate to C++ engine if running, else use server-side geometric recognizer
-    const shape = await geometryEngine.recognize(typedPoints);
+    const width = Math.max(1, Math.min(24, Number(strokeWidth) || 4));
+    const shape = await geometryEngine.recognize(typedPoints, width);
     res.json(shape);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Recognition failed";

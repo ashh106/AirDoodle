@@ -54,12 +54,11 @@ class HandTracker:
                     landmarks.append((id, cx, cy))
 
                 handedness_label = "Unknown"
-                if self.results.multi_handedness:
-                    handedness_label = (
-                        self.results.multi_handedness[idx]
-                        .classification[0]
-                        .label
-                    )  # 'Left' or 'Right'
+                handedness_score = 0.0
+                if self.results.multi_handedness and idx < len(self.results.multi_handedness):
+                    classification = self.results.multi_handedness[idx].classification[0]
+                    handedness_label = classification.label  # 'Left' or 'Right'
+                    handedness_score = float(classification.score)
 
                 if draw and self.mp_draw and self.mp_hands:
                     self.mp_draw.draw_landmarks(
@@ -69,7 +68,11 @@ class HandTracker:
                     )
 
                 hands_data.append(
-                    {"landmarks": landmarks, "handedness": handedness_label}
+                    {
+                        "landmarks": landmarks,
+                        "handedness": handedness_label,
+                        "score": round(handedness_score, 3),
+                    }
                 )
 
         return hands_data

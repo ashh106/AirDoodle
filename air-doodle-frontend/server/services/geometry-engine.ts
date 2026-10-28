@@ -129,8 +129,9 @@ export class GeometryEngineService {
     });
   }
 
-  public async recognize(points: Point[]): Promise<Shape> {
+  public async recognize(points: Point[], strokeWidth = 4): Promise<Shape & { engine: "native-cpp" | "fallback" }> {
     this.ensureProcess();
+    const style = { stroke: "#ffffff", fill: "none", strokeWidth };
     if (this.isNative) {
       try {
         const res = await this.sendCommand("recognize", { points });
@@ -140,27 +141,28 @@ export class GeometryEngineService {
             type: "freehand",
             geometry: { points: points.map(p => [p.x, p.y]) },
             rotation: 0,
-            style: { stroke: "#ffffff", fill: "none", strokeWidth: 2 },
+            style,
             revision: 1,
+            engine: "native-cpp",
           };
         }
         return {
           id: crypto.randomUUID(),
           ...res,
           rotation: 0,
-          style: { stroke: "#ffffff", fill: "none", strokeWidth: 2 },
+          style,
           revision: 1,
+          engine: "native-cpp",
         };
       } catch (err) {
         console.warn("[GeometryEngine] Native recognition failed, using fallback:", err);
       }
     }
 
-    // High-precision geometric recognition fallback
-    return this.fallbackRecognize(points);
+    return { ...this.fallbackRecognize(points, strokeWidth), engine: "fallback" };
   }
 
-  private fallbackRecognize(points: Point[]): Shape {
+  private fallbackRecognize(points: Point[], strokeWidth = 4): Shape {
     const xs = points.map(p => p.x);
     const ys = points.map(p => p.y);
     const minX = Math.min(...xs);
@@ -171,7 +173,7 @@ export class GeometryEngineService {
     const height = maxY - minY;
     const diag = Math.hypot(width, height);
     const id = crypto.randomUUID();
-    const style = { stroke: "#ffffff", fill: "none", strokeWidth: 2 };
+    const style = { stroke: "#ffffff", fill: "none", strokeWidth };
 
     const freehandFallback: Shape = {
       id,

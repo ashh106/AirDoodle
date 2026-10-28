@@ -54,5 +54,93 @@ class TestVisionAgentServer(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+    def test_camera_permission_control_and_privacy(self):
+        """Verifies camera is OFF by default and responds strictly to explicit start/stop messages."""
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        port = 8798
+
+        cmd = [sys.executable, os.path.join(root_dir, "vision", "agent_server.py"), "--port", str(port)]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        try:
+            time.sleep(1.2)
+
+            async def client_session():
+                uri = f"ws://localhost:{port}"
+                async with websockets.connect(uri) as ws:
+                    # Handshake must confirm camera is OFF
+                    handshake_raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                    handshake = json.loads(handshake_raw)
+                    self.assertEqual(handshake.get("type"), "agentStatus")
+                    self.assertEqual(handshake.get("cameraState"), "off")
+
+                    # Check status request
+                    await ws.send(json.dumps({"action": "status"}))
+                    status_raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                    status_data = json.loads(status_raw)
+                    self.assertEqual(status_data.get("type"), "cameraStatus")
+                    self.assertEqual(status_data.get("state"), "off")
+                    self.assertFalse(status_data.get("active"))
+
+                    # Stop capture when already off is a safe no-op
+                    await ws.send(json.dumps({"action": "stopCapture"}))
+                    await asyncio.sleep(0.1)
+
+            asyncio.run(client_session())
+
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def test_hand_locking_and_mode_switching(self):
+        """Verifies hand locking and mode switching protocol messages."""
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        port = 8797
+
+        cmd = [sys.executable, os.path.join(root_dir, "vision", "agent_server.py"), "--port", str(port)]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        try:
+            time.sleep(1.2)
+
+            async def client_session():
+                uri = f"ws://localhost:{port}"
+                async with websockets.connect(uri) as ws:
+                    handshake_raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                    handshake = json.loads(handshake_raw)
+                    self.assertEqual(handshake.get("lockedHand"), "auto")
+                    self.assertEqual(handshake.get("mode"), "draw")
+
+                    # Lock hand to Left
+                    await ws.send(json.dumps({"action": "lockHand", "hand": "Left"}))
+                    # Switch mode to music
+                    await ws.send(json.dumps({"action": "setMode", "mode": "music"}))
+                    await ws.send(json.dumps({"action": "status"}))
+
+                    status_raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                    status_data = json.loads(status_raw)
+                    self.assertEqual(status_data.get("lockedHand"), "Left")
+                    self.assertEqual(status_data.get("mode"), "music")
+
+            asyncio.run(client_session())
+
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
 if __name__ == "__main__":
     unittest.main()
